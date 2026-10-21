@@ -110,10 +110,21 @@ namespace CatSquad.RescateProfundo
             {
                 Vector2 dir = new Vector2(Mathf.Cos(deg * Mathf.Deg2Rad), Mathf.Sin(deg * Mathf.Deg2Rad));
                 float distance = fraction * arm.reach * 0.95f;
-                Vector3 pos = origin + (Vector3)(dir * distance);
+                Vector3 pos;
+                if (GameManager.FirstPerson && arm.submarine != null)
+                {
+                    // Primera persona: las burbujas flotan en el plano de trabajo delante de la cabina
+                    Vector3 lateral = (arm.submarine.Right * dir.x + Vector3.up * dir.y) * distance;
+                    pos = origin + lateral + arm.submarine.Forward * arm.restDepth;
+                }
+                else
+                {
+                    pos = origin + (Vector3)(dir * distance);
+                }
 
                 // No poner burbujas dentro de paredes ni fuera del agua
-                if (IsBlocked(origin, dir, distance + 0.4f)) continue;
+                Vector3 toPos = pos - origin;
+                if (IsBlocked(origin, toPos.normalized, toPos.magnitude + 0.4f)) continue;
                 if (!WaterZone.PointIsUnderwater(pos)) continue;
 
                 ReachBubble b = CreateBubble(pos);
@@ -125,7 +136,7 @@ namespace CatSquad.RescateProfundo
             }
         }
 
-        private static bool IsBlocked(Vector3 origin, Vector2 dir, float distance)
+        private static bool IsBlocked(Vector3 origin, Vector3 dir, float distance)
         {
             RaycastHit[] hits = Physics.RaycastAll(origin, dir, distance, ~0, QueryTriggerInteraction.Ignore);
             foreach (RaycastHit h in hits)
@@ -140,7 +151,7 @@ namespace CatSquad.RescateProfundo
 
         private ReachBubble CreateBubble(Vector3 pos)
         {
-            pos.z = -0.2f;
+            if (!GameManager.FirstPerson) pos.z = -0.2f;
             if (bubblePrefab != null) return Instantiate(bubblePrefab, pos, Quaternion.identity);
             GameObject go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             go.name = "Burbuja";

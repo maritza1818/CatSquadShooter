@@ -17,6 +17,10 @@ namespace CatSquad.RescateProfundo
 
         public string zoneId = "zona";
         public string displayName = "Zona";
+        [Tooltip("Ciudad: 0 = mar abierto, 1..3 = barrios; las cámaras de esclusa quedan entre medio (p. ej. 1.5)")]
+        public float order = 0f;
+        [Tooltip("Ciudad: es una cámara de esclusa (no un barrio)")]
+        public bool isLockChamber;
 
         [Header("Límites (mundo)")]
         public Vector2 min;
@@ -43,6 +47,8 @@ namespace CatSquad.RescateProfundo
         public float TargetLevel { get; private set; }
         public bool IsRising { get { return Level < TargetLevel - 0.02f; } }
         public bool IsFull { get { return Level >= max.y - 0.05f; } }
+        /// <summary>El agua bajó respecto de su nivel inicial (barrio drenado).</summary>
+        public bool IsDrained { get { return Level < baseLevel - 0.5f; } }
 
         private float pumpedLevel = float.NegativeInfinity;
 
@@ -69,7 +75,10 @@ namespace CatSquad.RescateProfundo
             UpdateVisual();
         }
 
-        /// <summary>Una bomba fija el nivel mínimo al que debe estar esta zona.</summary>
+        /// <summary>
+        /// Una bomba (o una esclusa) fija el nivel de esta zona: puede subirlo (vista lateral: llenar
+        /// compartimentos) o bajarlo (ciudad: drenar un barrio para liberarlo del agua).
+        /// </summary>
         public void SetPumpedLevel(float y, bool instant)
         {
             pumpedLevel = y;
@@ -79,7 +88,7 @@ namespace CatSquad.RescateProfundo
 
         private void RecalculateTarget()
         {
-            float target = Mathf.Max(baseLevel, pumpedLevel);
+            float target = float.IsNegativeInfinity(pumpedLevel) ? baseLevel : pumpedLevel;
             if (connectedTo != null && connectedTo.Level > connectionY)
             {
                 target = Mathf.Max(target, connectedTo.Level);

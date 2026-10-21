@@ -48,7 +48,7 @@ namespace CatSquad.RescateProfundo
             if (arm != null && grow >= 1f)
             {
                 Vector3 d = arm.TipPosition - transform.position;
-                d.z = 0f;
+                if (!GameManager.FirstPerson) d.z = 0f;
                 if (d.magnitude <= popRadius) Pop();
             }
         }

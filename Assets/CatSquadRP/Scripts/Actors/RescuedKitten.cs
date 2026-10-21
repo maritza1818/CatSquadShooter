@@ -35,6 +35,8 @@ namespace CatSquad.RescateProfundo
         private SteeringAgent agent;
         private readonly PathFollower dockPath = new PathFollower { waypointRadius = 0.8f, slowingRadius = 1.5f, stopRadius = 0.08f };
         private Vector3 seat;
+        private Dock seatDock;
+        private Vector3 seatLocal;
 
         private void Awake()
         {
@@ -50,6 +52,8 @@ namespace CatSquad.RescateProfundo
                 if (dock != null)
                 {
                     agent.Teleport(dock.ReserveSeat());
+                    seatDock = dock;
+                    seatLocal = dock.transform.InverseTransformPoint(agent.Position);
                 }
                 State = KittenState.Rescatado;
             }
@@ -74,6 +78,8 @@ namespace CatSquad.RescateProfundo
             followers.Remove(this);
             State = KittenState.VolviendoAlMuelle;
             seat = dock.ReserveSeat();
+            seatDock = dock;
+            seatLocal = dock.transform.InverseTransformPoint(seat);
             List<Vector3> path = new List<Vector3>();
             if (dock.waterEntry != null) path.Add(dock.waterEntry.position);
             path.Add(seat + Vector3.up * 1.2f);
@@ -91,16 +97,22 @@ namespace CatSquad.RescateProfundo
             switch (State)
             {
                 case KittenState.Atrapado:
-                case KittenState.Rescatado:
                     agent.Brake(dt);
-                    if (sub != null) agent.LookTowardsX(sub.transform.position.x - transform.position.x);
+                    if (sub != null) agent.FaceTowards(sub.transform.position);
+                    break;
+
+                case KittenState.Rescatado:
+                    // sentado en el muelle o en una balsa (que sube y baja con el agua del barrio)
+                    if (seatDock != null) agent.Teleport(seatDock.transform.TransformPoint(seatLocal));
+                    else agent.Brake(dt);
+                    if (sub != null) agent.FaceTowards(sub.transform.position);
                     break;
 
                 case KittenState.Siguiendo:
                     if (sub == null) { agent.Brake(dt); break; }
                     int slot = Mathf.Max(0, followers.IndexOf(this));
                     Vector3 target = sub.GetPointBehind(firstSlotDistance + slot * slotSpacing) + Vector3.up * verticalOffset;
-                    target.z = agent.body.planeZ;
+                    if (agent.body.lockToPlane) target.z = agent.body.planeZ;
                     agent.ArriveAt(target, slowingRadius, 0.08f, dt);
                     break;
 

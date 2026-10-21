@@ -12,6 +12,11 @@ namespace CatSquad.RescateProfundo
     {
         public static GameManager Instance { get; private set; }
 
+        [Header("Vista (la fija el constructor de escena)")]
+        public ViewMode viewMode = ViewMode.Lateral25D;
+
+        public static bool FirstPerson { get { return Instance != null && Instance.viewMode == ViewMode.PrimeraPersona; } }
+
         [Header("Referencias de escena (las asigna el constructor de escena)")]
         public SubmarineController submarine;
         public ManipulatorArm arm;
@@ -28,6 +33,8 @@ namespace CatSquad.RescateProfundo
         public int[] depthCosts = { 15, 35 };
         [Tooltip("Límite de profundidad (Y mundial) por nivel de mejora de Profundidad")]
         public float[] depthLimitsY = { -59f, -75f, -1000f };
+        [Tooltip("Primera persona (ciudad): metros que aguanta el casco BAJO LA SUPERFICIE del agua local, por nivel de mejora")]
+        public float[] maxDepths = { 18f, 26f, 40f };
         public float[] speedMultipliers = { 1f, 1.15f, 1.3f };
         public float[] pumpEfficiency = { 1f, 1.3f, 1.6f };
         public float[] headlightRanges = { 9f, 14f, 20f };
@@ -46,7 +53,12 @@ namespace CatSquad.RescateProfundo
 
         private string SavePath
         {
-            get { return Path.Combine(Application.persistentDataPath, "catsquad_rescate_profundo.json"); }
+            get
+            {
+                // La versión 3D guarda aparte para no mezclar el progreso con la demo del Avance 1
+                string file = viewMode == ViewMode.PrimeraPersona ? "catsquad_rescate_profundo_3d.json" : "catsquad_rescate_profundo.json";
+                return Path.Combine(Application.persistentDataPath, file);
+            }
         }
 
         private void Awake()
@@ -96,6 +108,9 @@ namespace CatSquad.RescateProfundo
             if (Data.pumps == null) Data.pumps = new System.Collections.Generic.List<PumpState>();
             if (Data.rescuedKittens == null) Data.rescuedKittens = new System.Collections.Generic.List<string>();
             if (Data.webcamCalibration == null) Data.webcamCalibration = new WebcamCalibrationData();
+            if (Data.secretsFound == null) Data.secretsFound = new System.Collections.Generic.List<string>();
+            if (Data.lastDistrict == null) Data.lastDistrict = "";
+            if (Data.settings.railSpeed <= 0.1f) Data.settings.railSpeed = 1.6f;
         }
 
         public void Save()
@@ -130,13 +145,15 @@ namespace CatSquad.RescateProfundo
                 input.mode = Settings.inputMode;
                 input.affectedSide = Settings.affectedSide;
                 input.invertRoles = Settings.invertRoles;
+                input.invertThumbs = Settings.invertPanelThumbs;
                 if (input.webcam != null)
                 {
                     input.webcam.compensationSensitivity = Settings.compensationSensitivity;
-                    if (Data.webcamCalibration != null && Data.webcamCalibration.valid)
+                    if (Data.webcamCalibration != null && (Data.webcamCalibration.valid || Data.webcamCalibration.HasGestures))
                     {
                         input.webcam.calibration = Data.webcamCalibration;
                     }
+                    input.webcam.ApplyGestureCalibration();
                 }
             }
             if (SettingsChanged != null) SettingsChanged();
@@ -206,6 +223,19 @@ namespace CatSquad.RescateProfundo
         public float HeadlightRange { get { return Pick(headlightRanges, GetUpgrade(UpgradeKind.Iluminacion)); } }
         public float HeadlightIntensity { get { return Pick(headlightIntensities, GetUpgrade(UpgradeKind.Iluminacion)); } }
         public float DepthLimitY { get { return Pick(depthLimitsY, GetUpgrade(UpgradeKind.Profundidad)); } }
+        public float MaxDepth { get { return Pick(maxDepths, GetUpgrade(UpgradeKind.Profundidad)); } }
+
+        /// <summary>
+        /// Y mínima a la que puede bajar el submarino en ese punto. En la ciudad (primera persona) se mide
+        /// desde la superficie del agua local: al DRENAR un barrio, su fondo queda al alcance del casco.
+        /// </summary>
+        public float DepthLimitAt(Vector3 p)
+        {
+            if (!FirstPerson) return DepthLimitY;
+            float surface = WaterZone.SurfaceAt(p);
+            if (float.IsInfinity(surface)) return float.NegativeInfinity;
+            return surface - MaxDepth;
+        }
 
         // ------------------------------------------------------------------ bombas y gatitos
 
@@ -236,5 +266,20 @@ namespace CatSquad.RescateProfundo
         }
 
         public int KittensRescued { get { return Data.rescuedKittens.Count; } }
+
+        // ------------------------------------------------------------------ secretos
+
+        public bool IsSecretFound(string id)
+        {
+            return Data.secretsFound.Contains(id);
+        }
+
+        public void MarkSecretFound(string id)
+        {
+            if (!Data.secretsFound.Contains(id)) Data.secretsFound.Add(id);
+            Save();
+        }
+
+        public int SecretsFound { get { return Data.secretsFound.Count; } }
     }
 }

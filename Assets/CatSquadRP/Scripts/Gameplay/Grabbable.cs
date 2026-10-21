@@ -44,7 +44,7 @@ namespace CatSquad.RescateProfundo
         protected Rigidbody rb;
         protected ManipulatorArm holder;
         private Collider[] ownColliders;
-        private float targetAngle;
+        private Quaternion targetRotation = Quaternion.identity;
 
         protected virtual void OnEnable()
         {
@@ -60,7 +60,9 @@ namespace CatSquad.RescateProfundo
         {
             rb = GetComponent<Rigidbody>();
             rb.useGravity = false;
-            rb.constraints = RigidbodyConstraints.FreezePositionZ | RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationY;
+            rb.constraints = GameManager.FirstPerson
+                ? RigidbodyConstraints.None
+                : RigidbodyConstraints.FreezePositionZ | RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationY;
             rb.interpolation = RigidbodyInterpolation.Interpolate;
             ownColliders = GetComponentsInChildren<Collider>();
             SpawnPosition = transform.position;
@@ -101,7 +103,13 @@ namespace CatSquad.RescateProfundo
         /// <summary>El brazo indica cada frame el ángulo de muñeca para que el objeto rote con la pinza.</summary>
         public void SetHeldAngle(float degrees)
         {
-            targetAngle = degrees;
+            targetRotation = Quaternion.Euler(0f, 0f, degrees);
+        }
+
+        /// <summary>Primera persona: orientación completa que debe tener el objeto sujeto.</summary>
+        public void SetHeldRotation(Quaternion rotation)
+        {
+            targetRotation = rotation;
         }
 
         private void SetIgnoreSubmarine(bool ignore)
@@ -125,12 +133,11 @@ namespace CatSquad.RescateProfundo
             if (holder != null)
             {
                 Vector3 target = holder.GripPoint + holdOffset;
-                target.z = 0f;
+                if (!GameManager.FirstPerson) target.z = 0f;
                 Vector3 desired = (target - rb.position) * followStrength;
                 rb.linearVelocity = Vector3.ClampMagnitude(desired, maxCarrySpeed);
 
-                Quaternion targetRot = Quaternion.Euler(0f, 0f, targetAngle);
-                Quaternion delta = targetRot * Quaternion.Inverse(rb.rotation);
+                Quaternion delta = targetRotation * Quaternion.Inverse(rb.rotation);
                 float angle;
                 Vector3 axis;
                 delta.ToAngleAxis(out angle, out axis);

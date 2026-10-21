@@ -52,6 +52,7 @@ namespace CatSquad.RescateProfundo
             shard.body.position = position;
             shard.body.velocity = initialVelocity;
             shard.body.planeZ = -0.3f;
+            shard.body.lockToPlane = !GameManager.FirstPerson;
             return shard;
         }
 
@@ -68,7 +69,7 @@ namespace CatSquad.RescateProfundo
             }
 
             Vector3 goal = target.position;
-            goal.z = body.planeZ;
+            if (body.lockToPlane) goal.z = body.planeZ;
 
             // ---- SEEK (la fuerza máxima crece con el tiempo para que nunca orbite para siempre)
             body.maxForce = 30f + age * 25f;

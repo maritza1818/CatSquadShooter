@@ -30,7 +30,7 @@ namespace CatSquad.RescateProfundo
             }
 
             Vector3 target = IsHeld ? Holder.GripPoint + holdOffset : anchor;
-            target.z = anchor.z;
+            if (!GameManager.FirstPerson) target.z = anchor.z;
             Vector3 offset = Vector3.ClampMagnitude(target - anchor, maxPull);
             rb.linearVelocity = (anchor + offset - rb.position) * 12f;
             rb.angularVelocity = Vector3.zero;

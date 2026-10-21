@@ -37,6 +37,7 @@ namespace CatSquad.RescateProfundo
         [HideInInspector] public Vector3 debugSteering;
 
         private float facingSign = 1f;
+        private float facingYaw3D;
         private float bobPhase;
 
         public Vector3 Position { get { return body.position; } }
@@ -113,16 +114,36 @@ namespace CatSquad.RescateProfundo
             if (Mathf.Abs(xDirection) > 0.01f) facingSign = Mathf.Sign(xDirection);
         }
 
+        /// <summary>Mira hacia un punto (vista lateral: solo izquierda/derecha; en 3D: gira completo).</summary>
+        public void FaceTowards(Vector3 point)
+        {
+            Vector3 d = point - body.position;
+            if (body.lockToPlane)
+            {
+                LookTowardsX(d.x);
+                return;
+            }
+            d.y = 0f;
+            if (d.sqrMagnitude > 0.01f) facingYaw3D = Mathf.Atan2(d.x, d.z) * Mathf.Rad2Deg;
+        }
+
         private void UpdateFacing(float dt)
         {
             if (!faceMovement || visual == null) return;
 
-            if (Mathf.Abs(body.velocity.x) > 0.25f)
+            float yaw;
+            if (body.lockToPlane)
             {
-                facingSign = Mathf.Sign(body.velocity.x);
+                if (Mathf.Abs(body.velocity.x) > 0.25f) facingSign = Mathf.Sign(body.velocity.x);
+                yaw = facingSign > 0f ? yawWhenMovingRight : -yawWhenMovingRight;
             }
-
-            float yaw = facingSign > 0f ? yawWhenMovingRight : -yawWhenMovingRight;
+            else
+            {
+                // 3D: mira hacia donde nada
+                Vector3 flat = new Vector3(body.velocity.x, 0f, body.velocity.z);
+                if (flat.magnitude > 0.25f) facingYaw3D = Mathf.Atan2(flat.x, flat.z) * Mathf.Rad2Deg;
+                yaw = facingYaw3D;
+            }
             float pitch = 0f;
             if (body.maxSpeed > 0.01f)
             {

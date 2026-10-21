@@ -55,6 +55,20 @@ namespace CatSquad.RescateProfundo
         public int cratesOpened;
         public int kittensFreed;
         public int kittensRescued;
+        // conducción (primera persona)
+        public string driveMode;
+        public float manualDriveSeconds;   // moviendo el submarino con la palanca
+        public float railDriveSeconds;     // llevado por el riel (automático o ayuda)
+        public int assistActivations;      // veces que la ayuda del riel tomó el control
+        public int secretsFound;           // cascabeles secretos (solo manejando)
+        public int panelNavigations;       // pulgar solo: mover la selección del panel de la cabina
+        public int panelConfirmations;     // ambos pulgares (o espera): confirmar un botón del panel
+
+        // Lab 05: lanzador (resortera bimanual)
+        public int launches;               // tiros (latas, lastres, boyas)
+        public int launchHits;             // tiros que dieron en su blanco
+        public int launchAssisted;         // tiros corregidos por la asistencia (imán o automática)
+        public float launchMeanPower;      // tirón medio (0..1 de la fuerza máxima)
 
         public List<RepRecord> reps = new List<RepRecord>();
     }
@@ -91,12 +105,14 @@ namespace CatSquad.RescateProfundo
         private float leverRun;
         private float fuelAtStart;
         private int materialsAtStart;
+        private int assistsAtStart;
 
         private void OnEnable()
         {
             MaterialCrate.AnyCrateOpened += OnCrate;
             RescuedKitten.AnyFreed += OnKittenFreed;
             RescuedKitten.AnyRescued += OnKittenRescued;
+            SecretBell.AnyFound += OnSecret;
         }
 
         private void OnDisable()
@@ -104,6 +120,7 @@ namespace CatSquad.RescateProfundo
             MaterialCrate.AnyCrateOpened -= OnCrate;
             RescuedKitten.AnyFreed -= OnKittenFreed;
             RescuedKitten.AnyRescued -= OnKittenRescued;
+            SecretBell.AnyFound -= OnSecret;
         }
 
         private void Start()
@@ -129,7 +146,9 @@ namespace CatSquad.RescateProfundo
                 Report.configuredMinutes = gm.Settings.sessionMinutes;
                 Report.invertedRoles = gm.Settings.invertRoles;
                 materialsAtStart = gm.Data.totalMaterialsCollected;
+                Report.driveMode = GameManager.FirstPerson ? gm.Settings.driveMode.ToString() : "Lateral";
             }
+            assistsAtStart = RailPilot.Instance != null ? RailPilot.Instance.AssistActivations : 0;
             if (input != null)
             {
                 Report.panelSide = input.PanelSide.ToString();
@@ -162,9 +181,24 @@ namespace CatSquad.RescateProfundo
                 Report.reachMaxPanel = Mathf.Max(Report.reachMaxPanel, f.panel.extension);
             }
 
+            // ---- conducción: palanca vs. riel
+            SubmarineController subm = GameManager.Instance != null ? GameManager.Instance.submarine : null;
+            if (GameManager.FirstPerson && subm != null && subm.State == SubState.Libre)
+            {
+                if (RailPilot.Instance != null && RailPilot.Instance.IsDriving) Report.railDriveSeconds += dt;
+                else if (f.helm.tracked && (Mathf.Abs(f.helm.turn) > 0.2f || Mathf.Abs(f.helm.throttle) > 0.2f || Mathf.Abs(f.helm.vertical) > 0.2f))
+                    Report.manualDriveSeconds += dt;
+            }
+
             // ---- palanca sostenida (contracción sostenida del lado asistente)
             bool leverOnPump = GameManager.Instance != null && GameManager.Instance.submarine != null
                                && GameManager.Instance.submarine.DockedPump != null && GameManager.Instance.submarine.DockedPump.LeverHeld;
+            // la palanca de una esclusa también es contracción sostenida del lado asistente
+            if (!leverOnPump && GameManager.Instance != null && GameManager.Instance.submarine != null)
+            {
+                LockStation lk = GameManager.Instance.submarine.AnchorOwner as LockStation;
+                leverOnPump = lk != null && lk.LeverHeld;
+            }
             if (leverOnPump)
             {
                 leverRun += dt;
@@ -220,6 +254,28 @@ namespace CatSquad.RescateProfundo
 
         private int compensatedAttempts;
 
+        /// <summary>Lab 05: un tiro del lanzador. Se guarda como repetición (agarrar · tirar · soltar).</summary>
+        public void RecordLaunch(ProjectileKind kind, bool hit, bool assisted, float power, float aimSeconds, bool compensated)
+        {
+            if (!Recording) return;
+            Report.launchMeanPower = (Report.launchMeanPower * Report.launches + power) / (Report.launches + 1);
+            Report.launches++;
+            if (hit) Report.launchHits++;
+            if (assisted) Report.launchAssisted++;
+            Report.reps.Add(new RepRecord
+            {
+                time = Time.time - startTime,
+                side = Report.manipSide,
+                objectKind = "lanzamiento_" + kind.ToString().ToLowerInvariant(),
+                success = hit,
+                extension = power,
+                rawExtension = power,
+                duration = aimSeconds,
+                velocityPeaks = 0,
+                compensated = compensated
+            });
+        }
+
         private void AddRep(bool success, string kind, float ext, float raw, float duration)
         {
             RepRecord r = new RepRecord
@@ -273,6 +329,19 @@ namespace CatSquad.RescateProfundo
             if (Recording) Report.kittensRescued++;
         }
 
+        /// <summary>El panel de la cabina informa cada gesto de pulgares (coordinación de ambas manos).</summary>
+        public void RecordPanel(bool confirmation)
+        {
+            if (!Recording) return;
+            if (confirmation) Report.panelConfirmations++;
+            else Report.panelNavigations++;
+        }
+
+        private void OnSecret(SecretBell b)
+        {
+            if (Recording) Report.secretsFound++;
+        }
+
         /// <summary>Cierra la sesión, calcula los agregados y exporta los archivos.</summary>
         public SessionReport EndSession()
         {
@@ -285,7 +354,7 @@ namespace CatSquad.RescateProfundo
             int ok = 0;
             foreach (RepRecord r in Report.reps)
             {
-                if (!r.success) continue;
+                if (!r.success || (r.objectKind != null && r.objectKind.StartsWith("lanzamiento"))) continue;
                 ok++;
                 extSum += r.extension;
                 durSum += r.duration;
@@ -303,6 +372,7 @@ namespace CatSquad.RescateProfundo
             {
                 Report.materialsCollected = GameManager.Instance.Data.totalMaterialsCollected - materialsAtStart;
             }
+            if (RailPilot.Instance != null) Report.assistActivations = RailPilot.Instance.AssistActivations - assistsAtStart;
 
             Export();
             return Report;
@@ -334,12 +404,27 @@ namespace CatSquad.RescateProfundo
                 File.WriteAllText(Path.Combine(folder, baseName + "_repeticiones.csv"), csv.ToString());
 
                 string summaryPath = Path.Combine(folder, "resumen_sesiones.csv");
+                const string header = "sesion,inicio,duracion_s,modo,lado_panel,lado_brazo,repeticiones,intentos,alcance_medio,alcance_max," +
+                                      "tiempo_medio_rep_s,picos_medios,prop_compensacion,prop_uso_brazo,palanca_s,palanca_max_s,resbalones,materiales,gatitos," +
+                                      "conduccion,manejo_manual_s,riel_s,ayudas_riel,secretos,panel_mover,panel_confirmar," +
+                                      "lanzamientos,aciertos,asistidos,tiron_medio";
+                if (File.Exists(summaryPath))
+                {
+                    // Un resumen de una versión anterior (con menos columnas) se guarda aparte
+                    string first = "";
+                    using (StreamReader reader = new StreamReader(summaryPath)) first = reader.ReadLine() ?? "";
+                    if (first != header)
+                    {
+                        string old = Path.Combine(folder, "resumen_sesiones_version_anterior.csv");
+                        if (File.Exists(old)) File.Delete(old);
+                        File.Move(summaryPath, old);
+                    }
+                }
                 bool newFile = !File.Exists(summaryPath);
                 StringBuilder s = new StringBuilder();
                 if (newFile)
                 {
-                    s.AppendLine("sesion,inicio,duracion_s,modo,lado_panel,lado_brazo,repeticiones,intentos,alcance_medio,alcance_max," +
-                                 "tiempo_medio_rep_s,picos_medios,prop_compensacion,prop_uso_brazo,palanca_s,palanca_max_s,resbalones,materiales,gatitos");
+                    s.AppendLine(header);
                 }
                 s.AppendLine(string.Join(",", new[]
                 {
@@ -349,7 +434,12 @@ namespace CatSquad.RescateProfundo
                     Report.meanRepSeconds.ToString("F2", ci), Report.meanVelocityPeaks.ToString("F2", ci),
                     Report.compensationRatio.ToString("F3", ci), Report.manipUsageRatio.ToString("F3", ci),
                     Report.leverHoldSeconds.ToString("F1", ci), Report.longestLeverHold.ToString("F1", ci),
-                    Report.slips.ToString(ci), Report.materialsCollected.ToString(ci), Report.kittensRescued.ToString(ci)
+                    Report.slips.ToString(ci), Report.materialsCollected.ToString(ci), Report.kittensRescued.ToString(ci),
+                    Report.driveMode ?? "", Report.manualDriveSeconds.ToString("F0", ci), Report.railDriveSeconds.ToString("F0", ci),
+                    Report.assistActivations.ToString(ci), Report.secretsFound.ToString(ci),
+                    Report.panelNavigations.ToString(ci), Report.panelConfirmations.ToString(ci),
+                    Report.launches.ToString(ci), Report.launchHits.ToString(ci), Report.launchAssisted.ToString(ci),
+                    Report.launchMeanPower.ToString("F2", ci)
                 }));
                 File.AppendAllText(summaryPath, s.ToString());
 

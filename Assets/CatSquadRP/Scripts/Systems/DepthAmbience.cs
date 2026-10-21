@@ -34,6 +34,12 @@ namespace CatSquad.RescateProfundo
             if (target == null) return;
             float y = target.position.y;
             float t = Mathf.InverseLerp(surfaceY, deepY, y);
+            if (GameManager.FirstPerson)
+            {
+                // Ciudad: la oscuridad depende de cuánta agua hay ENCIMA (un barrio drenado es más luminoso)
+                float surface = WaterZone.SurfaceAt(target.position);
+                if (!float.IsInfinity(surface)) t = Mathf.InverseLerp(0f, surfaceY - deepY, surface - y);
+            }
             t = t * t * (3f - 2f * t);
 
             Color fog = Color.Lerp(shallowFog, deepFog, t);
@@ -44,9 +50,25 @@ namespace CatSquad.RescateProfundo
 
             if (cam != null)
             {
-                // Sobre la superficie se ve el cielo; bajo el agua, el color del agua.
-                float camY = cam.transform.position.y;
-                cam.backgroundColor = camY > surfaceY + 1.5f ? skyColor : fog;
+                if (GameManager.FirstPerson)
+                {
+                    // Primera persona: si la cámara está fuera del agua (superficie o bolsa de aire), aire claro
+                    bool underwater = WaterZone.PointIsUnderwater(cam.transform.position);
+                    if (!underwater)
+                    {
+                        RenderSettings.fogColor = skyColor;
+                        RenderSettings.fogDensity = 0.004f;
+                        RenderSettings.ambientLight = shallowAmbient;
+                        if (sun != null) sun.intensity = shallowSun;
+                    }
+                    cam.backgroundColor = underwater ? fog : skyColor;
+                }
+                else
+                {
+                    // Sobre la superficie se ve el cielo; bajo el agua, el color del agua.
+                    float camY = cam.transform.position.y;
+                    cam.backgroundColor = camY > surfaceY + 1.5f ? skyColor : fog;
+                }
             }
         }
     }
