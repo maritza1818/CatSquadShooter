@@ -57,6 +57,41 @@ namespace CatSquad.RescateProfundo
             GuideCat guide = gm != null ? gm.guide : null;
             yield return null;
 
+            // Ciudad: la sesión empieza en la balsa del último barrio al que se llegó
+            Dock startRaft = null;
+            if (GameManager.FirstPerson && gm != null && !string.IsNullOrEmpty(gm.Data.lastDistrict))
+            {
+                startRaft = Dock.FindById(gm.Data.lastDistrict);
+                if (startRaft != null && startRaft.isBase) startRaft = null;
+            }
+            if (startRaft != null && sub != null)
+            {
+                Vector3 p = startRaft.SubPoint;
+                sub.TeleportTo(p, 90f);
+                if (guide != null)
+                {
+                    guide.TeleportTo(p + new Vector3(3f, 0.8f, 1.5f));
+                    guide.Say("¡Bienvenido de vuelta, capitán! Seguimos en " + DistrictName(p) + ". Calentemos esos brazos.");
+                    guide.TravelTo(new List<Vector3> { p + new Vector3(2.5f, -3f, 1.5f) });
+                }
+                bool arrivedRaft = false;
+                sub.StartAutopilot(new List<Vector3> { p + Vector3.down * 4f }, () => arrivedRaft = true);
+                float tRaft = 12f;
+                while (!arrivedRaft && tRaft > 0f) { tRaft -= Time.deltaTime; yield return null; }
+                sub.Unfreeze();
+                BeginCalibration(() =>
+                {
+                    StartPlaying();
+                    if (guide != null)
+                    {
+                        AnnouncePhaseTwoIfNeeded(guide);
+                        guide.FollowPlayer();
+                        guide.HintsEnabled = true;
+                    }
+                });
+                yield break;
+            }
+
             if (guide != null)
             {
                 guide.Say("¡Bienvenido de vuelta, capitán! Bajemos a calentar esos brazos.");
@@ -90,10 +125,21 @@ namespace CatSquad.RescateProfundo
             });
         }
 
+        private static string DistrictName(Vector3 p)
+        {
+            CityDistrict d = CityDistrict.At(p);
+            return d != null ? d.displayName : "la ciudad";
+        }
+
         public void AnnouncePhaseTwoIfNeeded(GuideCat guide)
         {
             GameManager gm = GameManager.Instance;
             if (gm == null || guide == null) return;
+            if (GameManager.FirstPerson)
+            {
+                guide.Say("¡A liberar Gatópolis! Junta chatarra y combustible: cada bomba drena un barrio y deja a los gatitos a salvo.");
+                return;
+            }
             if (gm.GetUpgrade(UpgradeKind.Profundidad) >= 1 && !gm.Data.phase2Announced)
             {
                 gm.Data.phase2Announced = true;
@@ -166,12 +212,34 @@ namespace CatSquad.RescateProfundo
             if (gm != null && gm.submarine != null)
             {
                 gm.submarine.InputEnabled = false;
-                gm.submarine.StartAutopilotHome(OnSurfaced);
+                if (GameManager.FirstPerson) GoToNearestRaft(gm.submarine);
+                else gm.submarine.StartAutopilotHome(OnSurfaced);
             }
             else
             {
                 OnSurfaced();
             }
+        }
+
+        /// <summary>
+        /// Ciudad: al acabarse el oxígeno, el riel lleva al submarino a la balsa de rescate del barrio
+        /// (Seek por el riel + Arrive en la balsa). Los gatitos que venían en fila bajan ahí.
+        /// </summary>
+        private void GoToNearestRaft(SubmarineController sub)
+        {
+            Vector3 pos = sub.transform.position;
+            Dock raft = Dock.FindForZone(WaterZone.FindAt(pos), pos);
+            List<Vector3> path = new List<Vector3>();
+            if (raft != null && RailNetwork.Instance != null && RailNetwork.Instance.PathTo(pos, raft.SubPoint, path))
+            {
+                GameManager.Instance.Data.lastDistrict = raft.isBase ? "" : raft.ZoneId;
+                sub.StartAutopilot(path, OnSurfaced);
+                return;
+            }
+            // sin ruta (p. ej. dentro de una esclusa cerrada): subir en línea recta a la superficie
+            float surface = WaterZone.SurfaceAt(pos);
+            if (float.IsInfinity(surface)) surface = pos.y + 5f;
+            sub.StartAutopilot(new List<Vector3> { new Vector3(pos.x, surface - 0.3f, pos.z) }, OnSurfaced);
         }
 
         private void OnSurfaced()

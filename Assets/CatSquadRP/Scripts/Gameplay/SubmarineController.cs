@@ -21,6 +21,16 @@ namespace CatSquad.RescateProfundo
         public float acceleration = 7f;
         [Range(0.3f, 1.2f)] public float verticalFactor = 0.85f;
 
+        [Header("Primera persona")]
+        [Tooltip("Grados por segundo al girar con la palanca")]
+        public float turnRate = 65f;
+        [Tooltip("Fracción de la velocidad al retroceder")]
+        public float reverseFactor = 0.6f;
+        [Tooltip("Cabeceo máximo (grados): la proa mira hacia abajo al bajar y hacia arriba al subir")]
+        public float maxDivePitch = 35f;
+        [Tooltip("Qué tan rápido se inclina la proa (1/s)")]
+        public float pitchResponse = 3f;
+
         [Header("Agua")]
         [Tooltip("Distancia del centro del submarino bajo la superficie cuando flota")]
         public float surfaceOffset = 0.4f;
@@ -55,11 +65,22 @@ namespace CatSquad.RescateProfundo
 
         public SubState State { get; private set; }
         public PumpStation DockedPump { get; private set; }
+        /// <summary>Objeto al que está anclado (bomba, caja, cerrojo...).</summary>
+        public UnityEngine.Object AnchorOwner { get; private set; }
+        public bool FirstPerson { get { return GameManager.FirstPerson; } }
+        public float Yaw { get { return yaw; } }
+        public float Pitch { get { return pitch; } }
+        /// <summary>Anclado a algo que se maneja con la palanca (bomba o esclusa): subir la mano no suelta el anclaje.</summary>
+        public bool AtLeverStation { get { return State == SubState.Acoplado && (DockedPump != null || AnchorOwner is LockStation); } }
+        public Vector3 Forward { get { return Quaternion.Euler(0f, yaw, 0f) * Vector3.forward; } }
+        public Vector3 Right { get { return Quaternion.Euler(0f, yaw, 0f) * Vector3.right; } }
         public bool InputEnabled { get; set; }
         public WaterZone CurrentZone { get; private set; }
         public Vector3 Velocity { get { return rb != null ? rb.linearVelocity : Vector3.zero; } }
         public float FacingSign { get { return facingSign; } }
         public bool IsSurfaced { get; private set; }
+        /// <summary>Faro alto (botón LUCES del panel de la cabina): el foco llega más lejos.</summary>
+        public bool HighBeam { get; set; }
 
         public event Action PressureWarning;
         public event Action<WaterZone> ZoneChanged;
@@ -76,6 +97,9 @@ namespace CatSquad.RescateProfundo
         private readonly List<Vector3> trail = new List<Vector3>();
         private float propellerAngle;
         private bool goingHome;
+        private float yaw;
+        private float pitch;
+        private float anchorYaw;
 
         public IReadOnlyList<Vector3> Trail { get { return trail; } }
 
@@ -83,9 +107,12 @@ namespace CatSquad.RescateProfundo
         {
             rb = GetComponent<Rigidbody>();
             rb.useGravity = false;
-            rb.constraints = RigidbodyConstraints.FreezePositionZ | RigidbodyConstraints.FreezeRotation;
+            rb.constraints = GameManager.FirstPerson
+                ? RigidbodyConstraints.FreezeRotation
+                : RigidbodyConstraints.FreezePositionZ | RigidbodyConstraints.FreezeRotation;
             rb.interpolation = RigidbodyInterpolation.Interpolate;
             rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            yaw = transform.eulerAngles.y;
             InputEnabled = true;
             State = SubState.Libre;
         }
@@ -102,6 +129,7 @@ namespace CatSquad.RescateProfundo
         public void Freeze()
         {
             holdPosition = rb.position;
+            anchorYaw = yaw;
             State = SubState.Congelado;
         }
 
@@ -113,7 +141,18 @@ namespace CatSquad.RescateProfundo
         public void DockTo(PumpStation pump)
         {
             if (State != SubState.Libre || redockCooldown > 0f) return;
+            if (FirstPerson)
+            {
+                Vector3 pos;
+                float poseYaw;
+                if (!pump.GetFirstPersonDockPose(this, out pos, out poseYaw)) return;
+                AnchorAt(pos, poseYaw, pump);
+                DockedPump = pump;
+                if (Docked != null) Docked(pump);
+                return;
+            }
             DockedPump = pump;
+            AnchorOwner = pump;
             State = SubState.Acoplado;
             undockTimer = 0f;
             if (pump.dockPoint != null)
@@ -126,16 +165,48 @@ namespace CatSquad.RescateProfundo
             if (Docked != null) Docked(pump);
         }
 
+        /// <summary>
+        /// Primera persona: el submarino llega con ARRIVE a una pose de trabajo y se queda anclado.
+        /// Lo usan las bombas y los objetivos del brazo (ver ReachAnchor).
+        /// </summary>
+        public void AnchorAt(Vector3 position, float yawDegrees, UnityEngine.Object owner)
+        {
+            if (State != SubState.Libre || redockCooldown > 0f) return;
+            holdPosition = position;
+            anchorYaw = yawDegrees;
+            AnchorOwner = owner;
+            DockedPump = owner as PumpStation;
+            State = SubState.Acoplado;
+            undockTimer = 0f;
+        }
+
+        /// <summary>Mueve la pose de anclaje (p. ej. la esclusa sube o baja el agua con el submarino dentro).</summary>
+        public void SetAnchorTarget(Vector3 position, UnityEngine.Object owner)
+        {
+            if (State == SubState.Acoplado && AnchorOwner == owner) holdPosition = position;
+        }
+
         public void Undock()
         {
             if (State != SubState.Acoplado) return;
             DockedPump = null;
+            AnchorOwner = null;
             State = SubState.Libre;
             redockCooldown = 2f;
             if (Undocked != null) Undocked();
         }
 
         public bool CanDock { get { return State == SubState.Libre && redockCooldown <= 0f; } }
+
+        /// <summary>Suelta el anclaje sin castigo cuando el objetivo ya se usó (caja abierta, jaula abierta).</summary>
+        public void ReleaseAnchor(UnityEngine.Object owner)
+        {
+            if (State == SubState.Acoplado && AnchorOwner == owner)
+            {
+                Undock();
+                redockCooldown = 0.5f;
+            }
+        }
 
         /// <summary>Vuelve a casa recorriendo su propio rastro al revés.</summary>
         public void StartAutopilotHome(Action onArrived)
@@ -163,13 +234,27 @@ namespace CatSquad.RescateProfundo
 
         public bool IsOnAutopilot { get { return State == SubState.PilotoAutomatico; } }
 
+        /// <summary>Lleva el submarino a un punto al instante (inicio de sesión en la balsa de un barrio).</summary>
+        public void TeleportTo(Vector3 position, float yawDegrees)
+        {
+            if (rb == null) rb = GetComponent<Rigidbody>();
+            rb.position = position;
+            transform.position = position;
+            rb.linearVelocity = Vector3.zero;
+            yaw = yawDegrees;
+            pitch = 0f;
+            transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+            rb.rotation = transform.rotation;
+            ResetTrail(position);
+        }
+
         public void ResetTrail(Vector3 origin)
         {
             trail.Clear();
-            origin.z = 0f;
+            if (!FirstPerson) origin.z = 0f;
             trail.Add(origin);
             Vector3 p = transform.position;
-            p.z = 0f;
+            if (!FirstPerson) p.z = 0f;
             if ((p - origin).magnitude > 0.2f) trail.Add(p);
         }
 
@@ -177,7 +262,7 @@ namespace CatSquad.RescateProfundo
         public Vector3 GetPointBehind(float distance)
         {
             Vector3 current = transform.position;
-            current.z = 0f;
+            if (!FirstPerson) current.z = 0f;
             float remaining = distance;
             for (int i = trail.Count - 1; i >= 0; i--)
             {
@@ -210,20 +295,55 @@ namespace CatSquad.RescateProfundo
             {
                 case SubState.Libre:
                 {
-                    Vector3 desired = new Vector3(stick.x, stick.y * verticalFactor, 0f) * maxSpeed * speedMul;
+                    Vector3 desired;
+                    if (FirstPerson && RailPilot.Instance != null && RailPilot.Instance.IsDriving)
+                    {
+                        // Modo automático / ayuda del riel: Seek por los puntos del riel + Arrive al objetivo
+                        v = RailPilot.Instance.Steer(this, pos, v, dt, ref yaw);
+                        break;
+                    }
+                    if (FirstPerson)
+                    {
+                        HelmFrame h = InputEnabled && frame.helm.tracked ? frame.helm : new HelmFrame();
+                        yaw += h.turn * turnRate * dt;
+                        float throttle = h.throttle < 0f ? h.throttle * reverseFactor : h.throttle;
+                        desired = (Forward * throttle + Vector3.up * h.vertical * verticalFactor) * maxSpeed * speedMul;
+                    }
+                    else
+                    {
+                        desired = new Vector3(stick.x, stick.y * verticalFactor, 0f) * maxSpeed * speedMul;
+                    }
                     v = Vector3.MoveTowards(v, desired, acceleration * dt);
                     break;
                 }
                 case SubState.Acoplado:
                 case SubState.Congelado:
                 {
-                    Vector3 toHold = holdPosition - pos;
-                    v = Vector3.MoveTowards(v, Vector3.ClampMagnitude(toHold * 3f, maxSpeed), acceleration * 1.5f * dt);
+                    // ARRIVE hacia la pose de anclaje (bomba, objetivo del brazo o punto de calibración)
+                    Vector3 steerHold = SteeringBehaviours.Arrive(pos, v, holdPosition, maxSpeed, 2.5f, 0.03f);
+                    v += SteeringBehaviours.Truncate(steerHold * 4f, acceleration * 1.5f) * dt;
+
+                    if (FirstPerson) yaw = Mathf.MoveTowardsAngle(yaw, anchorYaw, 110f * dt);
 
                     if (State == SubState.Acoplado)
                     {
-                        // Palanca horizontal sostenida = desacoplar (la vertical es la palanca de bomba)
-                        if (Mathf.Abs(stick.x) > 0.6f) undockTimer += dt; else undockTimer = 0f;
+                        bool wantsOut;
+                        if (FirstPerson)
+                        {
+                            // Girar o avanzar/retroceder sostenido = soltar el anclaje.
+                            // Subir sostenido es la palanca de la bomba, así que solo suelta si no es bomba.
+                            HelmFrame h = InputEnabled && frame.helm.tracked ? frame.helm : new HelmFrame();
+                            wantsOut = Mathf.Abs(h.turn) > 0.6f || Mathf.Abs(h.throttle) > 0.6f
+                                       || (!AtLeverStation && Mathf.Abs(h.vertical) > 0.6f);
+                            // En modo automático el riel decide cuándo soltar el anclaje
+                            if (RailPilot.Instance != null && RailPilot.Instance.SuppressHelmUndock) wantsOut = false;
+                        }
+                        else
+                        {
+                            // Palanca horizontal sostenida = desacoplar (la vertical es la palanca de bomba)
+                            wantsOut = Mathf.Abs(stick.x) > 0.6f;
+                        }
+                        if (wantsOut) undockTimer += dt; else undockTimer = 0f;
                         if (undockTimer > 0.45f) Undock();
                     }
                     break;
@@ -234,10 +354,20 @@ namespace CatSquad.RescateProfundo
                     Vector3 steer = autopilotPath.Steer(pos, v, autopilotSpeed);
                     steer = SteeringBehaviours.Truncate(steer * autopilotResponsiveness, autopilotMaxForce);
                     v = SteeringBehaviours.Truncate(v + steer * dt, autopilotSpeed);
+                    if (FirstPerson)
+                    {
+                        Vector3 flat = new Vector3(v.x, 0f, v.z);
+                        if (flat.magnitude > 0.4f)
+                        {
+                            float targetYaw = Mathf.Atan2(flat.x, flat.z) * Mathf.Rad2Deg;
+                            yaw = Mathf.MoveTowardsAngle(yaw, targetYaw, 140f * dt);
+                        }
+                    }
                     if (autopilotPath.Arrived(pos, v, 0.6f))
                     {
                         State = SubState.Congelado;
                         holdPosition = pos;
+                        anchorYaw = yaw;
                         Action cb = autopilotArrived;
                         autopilotArrived = null;
                         if (cb != null) cb();
@@ -263,7 +393,7 @@ namespace CatSquad.RescateProfundo
             // ---- límite de presión (mejora de Profundidad)
             if (GameManager.Instance != null && State != SubState.PilotoAutomatico)
             {
-                float limit = GameManager.Instance.DepthLimitY;
+                float limit = GameManager.Instance.DepthLimitAt(pos);
                 if (pos.y < limit)
                 {
                     v.y = Mathf.Max(v.y, (limit - pos.y) * 3f + 1f);
@@ -275,7 +405,24 @@ namespace CatSquad.RescateProfundo
                 }
             }
 
-            v.z = 0f;
+            if (FirstPerson)
+            {
+                // Cabeceo: al bajar la proa mira hacia abajo (y al subir, hacia arriba) para ver a dónde se va.
+                // Anclado o quieto, se nivela solo.
+                float targetPitch = 0f;
+                if (State == SubState.Libre || State == SubState.PilotoAutomatico)
+                {
+                    float verticalMax = Mathf.Max(0.5f, maxSpeed * verticalFactor);
+                    targetPitch = Mathf.Clamp(-v.y / verticalMax, -1f, 1f) * maxDivePitch;
+                    if (IsSurfaced && targetPitch < 0f) targetPitch = 0f; // en la superficie no apunta al cielo
+                }
+                pitch = Mathf.Lerp(pitch, targetPitch, 1f - Mathf.Exp(-pitchResponse * dt));
+                rb.MoveRotation(Quaternion.Euler(pitch, yaw, 0f));
+            }
+            else
+            {
+                v.z = 0f;
+            }
             rb.linearVelocity = v;
 
             UpdateZone(pos);
@@ -295,7 +442,7 @@ namespace CatSquad.RescateProfundo
         private void UpdateTrail(Vector3 pos)
         {
             if (goingHome) return;
-            pos.z = 0f;
+            if (!FirstPerson) pos.z = 0f;
             Vector3 last = trail.Count > 0 ? trail[trail.Count - 1] : pos;
             if (trail.Count > 0 && (pos - last).magnitude < breadcrumbSpacing) return;
 
@@ -320,12 +467,16 @@ namespace CatSquad.RescateProfundo
             float dt = Time.deltaTime;
             Vector3 v = Velocity;
 
-            if (State == SubState.Libre || State == SubState.PilotoAutomatico)
+            if (!FirstPerson && (State == SubState.Libre || State == SubState.PilotoAutomatico))
             {
                 if (Mathf.Abs(v.x) > 0.3f) facingSign = Mathf.Sign(v.x);
             }
 
-            if (visual != null)
+            if (visual != null && FirstPerson)
+            {
+                visual.localRotation = Quaternion.identity; // en primera persona el casco gira con la raíz
+            }
+            else if (visual != null)
             {
                 float yaw = facingSign > 0f ? yawRight : -yawRight;
                 float pitch = -Mathf.Clamp(v.y / Mathf.Max(0.1f, maxSpeed), -1f, 1f) * maxPitch;
@@ -344,13 +495,20 @@ namespace CatSquad.RescateProfundo
             {
                 // El foco apunta hacia delante y un poco hacia la pared del fondo, para que
                 // su cono ilumine el escenario (nunca hacia la cámara, mire a donde mire).
-                float fx = visual != null ? visual.forward.x : facingSign;
-                Vector3 aim = new Vector3(fx, -0.18f, 0.6f);
-                headlight.transform.rotation = Quaternion.LookRotation(aim.normalized, Vector3.up);
+                if (FirstPerson)
+                {
+                    headlight.transform.rotation = Quaternion.LookRotation((transform.forward - Vector3.up * 0.12f).normalized, Vector3.up);
+                }
+                else
+                {
+                    float fx = visual != null ? visual.forward.x : facingSign;
+                    Vector3 aim = new Vector3(fx, -0.18f, 0.6f);
+                    headlight.transform.rotation = Quaternion.LookRotation(aim.normalized, Vector3.up);
+                }
                 if (GameManager.Instance != null)
                 {
-                    headlight.range = GameManager.Instance.HeadlightRange;
-                    headlight.intensity = GameManager.Instance.HeadlightIntensity;
+                    headlight.range = GameManager.Instance.HeadlightRange * (HighBeam ? 1.6f : 1f);
+                    headlight.intensity = GameManager.Instance.HeadlightIntensity * (HighBeam ? 1.5f : 1f);
                 }
             }
 

@@ -79,7 +79,8 @@ namespace CatSquad.RescateProfundo
             for (int i = 0; i < count; i++)
             {
                 float angle = (i / (float)count) * Mathf.PI * 2f + UnityEngine.Random.value;
-                Vector3 burst = new Vector3(Mathf.Cos(angle), Mathf.Sin(angle) + 0.5f, 0f) * burstSpeed;
+                float bz = GameManager.FirstPerson ? UnityEngine.Random.Range(-1f, 1f) : 0f;
+                Vector3 burst = new Vector3(Mathf.Cos(angle), Mathf.Sin(angle) + 0.5f, bz) * burstSpeed;
                 MaterialShard.Spawn(shardPrefab, shardMaterial, transform.position + Vector3.up * 0.3f, burst, target);
             }
 

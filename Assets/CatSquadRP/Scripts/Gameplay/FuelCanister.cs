@@ -130,7 +130,7 @@ namespace CatSquad.RescateProfundo
             {
                 if (p == null || p.intake == null) continue;
                 Vector3 d = p.intake.position - from;
-                d.z = 0f;
+                if (!GameManager.FirstPerson) d.z = 0f;
                 float dist = d.magnitude;
                 if (dist <= p.intakeRadius && dist < bestDistance)
                 {
@@ -149,7 +149,7 @@ namespace CatSquad.RescateProfundo
             if (!show) return;
             Vector3 a = spout != null ? spout.position : transform.position;
             Vector3 b = NearbyPump.intake.position;
-            a.z = b.z = -0.4f;
+            if (!GameManager.FirstPerson) a.z = b.z = -0.4f;
             stream.SetPosition(0, a);
             stream.SetPosition(1, b);
         }

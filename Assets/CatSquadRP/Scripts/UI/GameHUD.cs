@@ -246,13 +246,21 @@ namespace CatSquad.RescateProfundo
                 body =
                     "Chatarra recolectada: <b>" + r.materialsCollected + "</b>\n" +
                     "Cajas abiertas: <b>" + r.cratesOpened + "</b>     Combustible vertido: <b>" + r.fuelPoured.ToString("F1", ci) + "</b>\n" +
-                    "Gatitos liberados: <b>" + r.kittensFreed + "</b>     Gatitos a salvo hoy: <b>" + r.kittensRescued + "</b>\n\n" +
+                    "Gatitos liberados: <b>" + r.kittensFreed + "</b>     Gatitos a salvo hoy: <b>" + r.kittensRescued + "</b>\n" +
+                    (r.secretsFound > 0 ? "¡Cascabeles secretos encontrados: <b>" + r.secretsFound + "</b>!\n" : "") +
+                    (r.launches > 0 ? "Latas, lastres y boyas en el blanco: <b>" + r.launchHits + "</b>\n" : "") + "\n" +
                     "<size=26><color=#9fd8ff>Para el terapeuta</color>\n" +
                     "Repeticiones (agarres): " + r.repetitions + "  ·  Intentos de alcance: " + r.attempts + "\n" +
                     "Alcance medio / máx. (brazo " + r.manipSide + "): " + (r.reachMeanManip * 100f).ToString("F0", ci) + "% / " + (r.reachMaxManip * 100f).ToString("F0", ci) + "%\n" +
                     "Tiempo medio por repetición: " + r.meanRepSeconds.ToString("F1", ci) + " s  ·  Picos de velocidad: " + r.meanVelocityPeaks.ToString("F1", ci) + "\n" +
                     "Palanca sostenida (panel " + r.panelSide + "): " + r.leverHoldSeconds.ToString("F0", ci) + " s (máx. " + r.longestLeverHold.ToString("F1", ci) + " s)\n" +
-                    "Intentos con compensación de tronco: " + (r.compensationRatio * 100f).ToString("F0", ci) + "%  ·  Uso brazo/panel: " + (r.manipUsageRatio * 100f).ToString("F0", ci) + "% / " + ((1f - r.manipUsageRatio) * 100f).ToString("F0", ci) + "%</size>";
+                    "Intentos con compensación de tronco: " + (r.compensationRatio * 100f).ToString("F0", ci) + "%  ·  Uso brazo/panel: " + (r.manipUsageRatio * 100f).ToString("F0", ci) + "% / " + ((1f - r.manipUsageRatio) * 100f).ToString("F0", ci) + "%" +
+                    (GameManager.FirstPerson
+                        ? "\nConducción " + r.driveMode + ": palanca " + r.manualDriveSeconds.ToString("F0", ci) + " s  ·  riel " + r.railDriveSeconds.ToString("F0", ci) + " s  ·  ayudas del riel: " + r.assistActivations
+                          + "\nPanel con pulgares: " + r.panelNavigations + " movimientos  ·  " + r.panelConfirmations + " confirmaciones"
+                          + (r.launches > 0 ? "\nLanzador: " + r.launchHits + " aciertos de " + r.launches + " tiros  ·  tirón medio "
+                             + (r.launchMeanPower * 100f).ToString("F0", ci) + "%  ·  asistidos: " + r.launchAssisted : "")
+                        : "") + "</size>";
             }
             else body = "Sin datos de métricas.";
 
@@ -279,7 +287,7 @@ namespace CatSquad.RescateProfundo
 
             WorkshopRow(UpgradeKind.Autonomia, "Motor (autonomía)", "Más velocidad y la bomba rinde más con cada bidón.", 0);
             WorkshopRow(UpgradeKind.Iluminacion, "Foco (iluminación)", "Ilumina más lejos en las zonas oscuras (y atrae más peces).", 1);
-            WorkshopRow(UpgradeKind.Profundidad, "Casco (profundidad)", "Permite bajar más: la fosa y sus gatitos varados.", 2);
+            WorkshopRow(UpgradeKind.Profundidad, "Casco (profundidad)", GameManager.FirstPerson ? "Aguanta más metros bajo la superficie: llegas a las calles antes de drenar." : "Permite bajar más: la fosa y sus gatitos varados.", 2);
 
             MakeButton(modalContent, "Nueva sesión", new Vector2(0.5f, 0f), new Vector2(0f, 40f), new Vector2(420f, 80f), () =>
             {
@@ -365,7 +373,25 @@ namespace CatSquad.RescateProfundo
             if (statusText != null && BimanualInput.Instance != null)
             {
                 string phase = session != null ? session.Phase.ToString() : "";
-                statusText.text = BimanualInput.Instance.StatusText() + "   ·   " + phase + "   ·   F1: panel del terapeuta";
+                string drive = "";
+                if (GameManager.FirstPerson && gm != null)
+                {
+                    drive = "   ·   " + (gm.Settings.driveMode == DriveMode.Automatico ? "Automático" : "Manual")
+                            + (RailPilot.Instance != null && RailPilot.Instance.AssistActive ? " (ayuda del riel)" : "");
+                    if (gm.SecretsFound > 0) drive += "   ·   Cascabeles: " + gm.SecretsFound + "/" + SecretBell.TotalInScene;
+                    if (gm.submarine != null)
+                    {
+                        Vector3 sp = gm.submarine.transform.position;
+                        CityDistrict district = CityDistrict.At(sp);
+                        WaterZone zone = WaterZone.FindAt(sp);
+                        if (district != null)
+                            drive = "   ·   Nivel " + district.levelNumber + ": " + district.displayName
+                                    + (district.levelNumber > 0 && district.Freed ? " (liberado)" : "") + drive;
+                        else if (zone != null && zone.isLockChamber)
+                            drive = "   ·   " + zone.displayName + drive;
+                    }
+                }
+                statusText.text = BimanualInput.Instance.StatusText() + "   ·   " + phase + drive + "   ·   F1: panel del terapeuta";
             }
 
             // Aviso
@@ -399,6 +425,19 @@ namespace CatSquad.RescateProfundo
         private string HelpText()
         {
             bool webcam = BimanualInput.Instance != null && BimanualInput.Instance.UsingWebcam;
+            if (webcam && GameManager.FirstPerson)
+            {
+                return "<b>Controles (webcam)</b>\n" +
+                       "Mano del PANEL (timón):\n" +
+                       "  · palma abajo: quieto · a los lados: gira\n" +
+                       "  · subirla: sube (y palanca)\n" +
+                       "  · abrirla: baja\n" +
+                       "  · de canto: avanza · + pulgar: retrocede\n" +
+                       "Juntar las manos: panel de la cabina\n" +
+                       "Palmas abajo + un pulgar: elegir · ambos: confirmar\n" +
+                       "Mano del BRAZO: pinza · cerrar = sujetar\n" +
+                       "H: ocultar ayuda · F1: terapeuta";
+            }
             if (webcam)
             {
                 return "<b>Controles (webcam)</b>\n" +
@@ -408,6 +447,21 @@ namespace CatSquad.RescateProfundo
                        "  · cerrar la mano = sujetar\n" +
                        "  · girar la muñeca = verter\n" +
                        "H: ocultar ayuda";
+            }
+            GameManager gm = GameManager.Instance;
+            if (GameManager.FirstPerson)
+            {
+                return "<b>Controles (teclado + mouse)</b>\n" +
+                       "W avanzar · S retroceder · A/D girar\n" +
+                       "Espacio subir (y palanca de bomba)\n" +
+                       "Shift o C bajar\n" +
+                       "Mouse: pinza · Clic izq.: sujetar\n" +
+                       "E / Q o clic der.: girar muñeca\n" +
+                       "M: plegar/desplegar el panel del mapa\n" +
+                       "Z / X: pulgar izq. / der. (elegir botón)\n" +
+                       "Z+X o Enter: confirmar\n" +
+                       "R: modo " + (gm != null && gm.Settings.driveMode == DriveMode.Automatico ? "MANUAL" : "AUTOMÁTICO (riel)") + "\n" +
+                       "L: simular compensación · H/F1";
             }
             return "<b>Controles (teclado + mouse)</b>\n" +
                    "WASD / flechas: panel (mover)\n" +
@@ -427,6 +481,13 @@ namespace CatSquad.RescateProfundo
             ManipulatorArm arm = gm.arm;
 
             if (sub.IsOnAutopilot) return "Piloto automático...";
+            ProjectileLauncher launcher = ProjectileLauncher.Instance;
+            if (launcher != null && launcher.IsOpen) return launcher.PromptText(webcam);
+            if (RailPilot.Instance != null && RailPilot.Instance.IsDriving)
+            {
+                string rail = RailPilot.Instance.PromptText;
+                if (!string.IsNullOrEmpty(rail)) return rail;
+            }
 
             FuelCanister fuel = arm.Held as FuelCanister;
             if (fuel != null)
@@ -437,12 +498,22 @@ namespace CatSquad.RescateProfundo
                 return "Lleva el bidón al embudo de una bomba";
             }
 
+            LockStation lockHere = sub.State == SubState.Acoplado ? sub.AnchorOwner as LockStation : null;
+            if (lockHere != null) return lockHere.PromptText(webcam);
+
             if (sub.DockedPump != null)
             {
                 PumpStation p = sub.DockedPump;
                 if (p.IsPumping) return "¡Bombeando! " + Mathf.RoundToInt(p.Progress * 100f) + "%";
                 if (p.Tank > 0.01f) return webcam ? "Mantén arriba la mano del panel para bombear" : "Mantén ESPACIO para bombear";
+                if (GameManager.FirstPerson) return "Acoplado a la " + p.displayName.ToLower() + ": trae un bidón · para soltarte, gira o avanza";
                 return "Acoplado a la " + p.displayName.ToLower() + ": trae un bidón y viértelo en el embudo";
+            }
+
+            if (sub.AnchorOwner is ReachAnchor && arm.Held == null)
+            {
+                return webcam ? "¡Anclado! Estira el brazo hacia el objetivo y cierra la mano"
+                              : "¡Anclado! Lleva la pinza al objetivo y haz clic";
             }
 
             if (arm.Held != null)
@@ -454,6 +525,11 @@ namespace CatSquad.RescateProfundo
             {
                 if (arm.DwellProgress > 0.01f) return "Mantén la pinza quieta... " + Mathf.RoundToInt(arm.DwellProgress * 100f) + "%";
                 return (webcam ? "Cierra la mano" : "Clic izquierdo") + " para sujetar: " + arm.HoverCandidate.displayName;
+            }
+            if (launcher != null && launcher.CanOpen && sub.Velocity.magnitude < 1.5f)
+            {
+                return sub.IsSurfaced ? "¡Gatitos con hambre cerca! Abre el LANZADOR en el panel" + (webcam ? "" : " (o G)")
+                                      : "Hay un blanco para el lanzador cerca: LANZAR en el panel" + (webcam ? "" : " (o G)");
             }
             return "";
         }

@@ -13,12 +13,42 @@ namespace CatSquad.RescateProfundo.EditorTools
     /// Menú: CatSquad > Construir escena Rescate Profundo.
     /// Todo queda como objetos normales en la escena: después se puede editar a mano.
     /// </summary>
-    public static class RescateProfundoSceneBuilder
+    public static partial class RescateProfundoSceneBuilder
     {
-        private const string Root = "Assets/CatSquadRP";
-        private const string MatDir = Root + "/Materials";
-        private const string SceneDir = Root + "/Scenes";
-        private const string ScenePath = SceneDir + "/RescateProfundo.unity";
+        // La carpeta raíz se detecta sola a partir de la ubicación de este script,
+        // así funciona aunque la carpeta CatSquadRP esté en otro lugar dentro de Assets.
+        private const string ThisScript = "/Editor/RescateProfundoSceneBuilder.cs";
+        private static string root;
+        private static string Root { get { if (root == null) root = FindRoot(); return root; } }
+        private static string MatDir { get { return Root + "/Materials"; } }
+        private static string SceneDir { get { return Root + "/Scenes"; } }
+        private static string ScenePath { get { return SceneDir + (FP ? "/RescateProfundo3D.unity" : "/RescateProfundo.unity"); } }
+
+        /// <summary>true = versión en primera persona (cabina 3D). false = vista lateral del Avance 1.</summary>
+        private static bool FP;
+        /// <summary>Profundidad (Z) del complejo en primera persona.</summary>
+        private const float Depth3D = 10f;
+        /// <summary>Profundidad del mar abierto en primera persona.</summary>
+        private const float SeaDepth3D = 50f;
+        private static System.Random zRnd;
+        private static int anchorCounter;
+
+        /// <summary>Z aleatoria dentro del complejo (0 en la vista lateral).</summary>
+        private static float RandZ(float margin = 1.8f)
+        {
+            if (!FP) return 0f;
+            return ((float)zRnd.NextDouble() - 0.5f) * (Depth3D - 2f * margin);
+        }
+
+        private static string FindRoot()
+        {
+            foreach (string guid in AssetDatabase.FindAssets("RescateProfundoSceneBuilder t:MonoScript"))
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid).Replace('\\', '/');
+                if (path.EndsWith(ThisScript)) return path.Substring(0, path.Length - ThisScript.Length);
+            }
+            return "Assets/CatSquadRP";
+        }
         private const float C = LevelLayout.CellSize;
         private const float WallFront = -1.2f;
         private const float WallBack = 3.0f;
@@ -36,6 +66,7 @@ namespace CatSquad.RescateProfundo.EditorTools
             try
             {
                 EditorUtility.DisplayProgressBar("Cat Squad", "Preparando recursos...", 0.1f);
+                FP = false;
                 Build();
             }
             finally
@@ -44,11 +75,31 @@ namespace CatSquad.RescateProfundo.EditorTools
             }
         }
 
+        [MenuItem("CatSquad/Construir escena 3D (primera persona)", priority = 2)]
+        public static void BuildMenu3D()
+        {
+            if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
+            try
+            {
+                EditorUtility.DisplayProgressBar("Cat Squad", "Preparando recursos...", 0.1f);
+                FP = true;
+                Build();
+            }
+            finally
+            {
+                FP = false;
+                EditorUtility.ClearProgressBar();
+            }
+        }
+
         [MenuItem("CatSquad/Borrar progreso guardado", priority = 20)]
         public static void DeleteSave()
         {
-            string p = Path.Combine(Application.persistentDataPath, "catsquad_rescate_profundo.json");
-            if (File.Exists(p)) File.Delete(p);
+            foreach (string f in new[] { "catsquad_rescate_profundo.json", "catsquad_rescate_profundo_3d.json" })
+            {
+                string p = Path.Combine(Application.persistentDataPath, f);
+                if (File.Exists(p)) File.Delete(p);
+            }
             EditorUtility.DisplayDialog("Cat Squad", "Progreso borrado. La próxima partida empezará con el tutorial.", "OK");
         }
 
@@ -64,7 +115,17 @@ namespace CatSquad.RescateProfundo.EditorTools
 
         private static void Build()
         {
-            rows = LevelLayout.Rows;
+            root = null;
+            Debug.Log("[CatSquad] Carpeta del paquete: " + Root);
+            if (AssetDatabase.LoadAssetAtPath<GameObject>(Root + "/Models/Submarino.fbx") == null)
+            {
+                EditorUtility.DisplayDialog("Cat Squad",
+                    "No encuentro los modelos en " + Root + "/Models.\n\nRevisa que la carpeta CatSquadRP se haya copiado completa " +
+                    "(con Models, Textures y Audio). Se usarán formas simples en su lugar.", "Continuar");
+            }
+            zRnd = new System.Random(21);
+            anchorCounter = 0;
+            rows = FP ? CityLayout.Rows : LevelLayout.Rows;
             H = rows.Length;
             W = 0;
             foreach (string r in rows) W = Mathf.Max(W, r.Length);
@@ -86,13 +147,21 @@ namespace CatSquad.RescateProfundo.EditorTools
             GameObject actorsRoot = new GameObject("== ACTORES ==");
             GameObject systemsRoot = new GameObject("== SISTEMAS ==");
 
+            if (FP)
+            {
+                // Primera persona: Gatópolis, la ciudad inundada (ver RescateProfundoSceneBuilder.Ciudad.cs)
+                BuildCity(world, level, waterRoot, itemsRoot, decoRoot, pointsRoot, actorsRoot, systemsRoot);
+                FinishScene(scene, GameObject.Find("Submarino"));
+                return;
+            }
+
             BuildEnvironment(systemsRoot);
             BuildWalls(level);
             BuildGrates(level);
 
             Dictionary<char, Transform> points = BuildPoints(pointsRoot);
             Vector3 subSpawn = CellCenter(FindChar('S')) ;
-            subSpawn.y = -5.6f;
+            subSpawn.y = FP ? -5.25f : -5.6f;
 
             EditorUtility.DisplayProgressBar("Cat Squad", "Agua y compartimentos...", 0.45f);
             Dictionary<string, WaterZone> zones = BuildWater(waterRoot);
@@ -107,24 +176,41 @@ namespace CatSquad.RescateProfundo.EditorTools
             Dock dock = BuildDock(world, subSpawn);
 
             EditorUtility.DisplayProgressBar("Cat Squad", "Sistemas...", 0.85f);
-            Camera cam = BuildCamera(systemsRoot, sub.transform);
+            Camera cam = FP ? BuildCockpitCamera(sub) : BuildCamera(systemsRoot, sub.transform);
+            if (FP) BuildCorridorLamps(level);
             BuildSystems(systemsRoot, sub, arm, guide, dock, cam, zones, items, points, subSpawn);
+            FinishScene(scene, sub.gameObject);
+        }
 
+        private static void FinishScene(Scene scene, GameObject select)
+        {
             EditorSceneManager.MarkSceneDirty(scene);
             EditorSceneManager.SaveScene(scene, ScenePath);
             AddSceneToBuild(ScenePath);
             AssetDatabase.SaveAssets();
 
-            Selection.activeGameObject = sub.gameObject;
+            if (select != null) Selection.activeGameObject = select;
             EditorUtility.DisplayDialog("Cat Squad: Rescate Profundo",
-                "Escena creada en " + ScenePath + ".\n\nPulsa Play para jugar.\nF1 abre el panel del terapeuta.", "¡Vamos!");
+                "Escena creada en " + ScenePath + ".\n\nPulsa Play para jugar.\nF1 abre el panel del terapeuta." +
+                (FP ? "\nM pliega/despliega el panel del mapa. R cambia a modo automático." : ""), "¡Vamos!");
         }
 
         // ================================================================== utilidades
 
         private static void EnsureFolder(string parent, string name)
         {
-            if (!AssetDatabase.IsValidFolder(parent + "/" + name)) AssetDatabase.CreateFolder(parent, name);
+            string assetPath = parent + "/" + name;
+            if (AssetDatabase.IsValidFolder(assetPath)) return;
+
+            // Crear en disco (funciona aunque Unity aún no haya registrado la carpeta) y refrescar
+            string projectRoot = Path.GetDirectoryName(Application.dataPath);
+            Directory.CreateDirectory(Path.Combine(projectRoot, assetPath));
+            AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+
+            if (!AssetDatabase.IsValidFolder(assetPath))
+            {
+                throw new System.Exception("[CatSquad] No se pudo crear la carpeta " + assetPath);
+            }
         }
 
         private static GameObject Child(GameObject parent, string name)
@@ -141,7 +227,7 @@ namespace CatSquad.RescateProfundo.EditorTools
             return col < r.Length ? r[col] : '#';
         }
 
-        private static bool IsSolid(char c) { return c == '#' || c == 'G'; }
+        private static bool IsSolid(char c) { return c == '#' || c == 'G' || c == 'X' || c == 'B' || c == '='; }
 
         private static Vector3 CellCenter(Vector2Int cell)
         {
@@ -299,6 +385,16 @@ namespace CatSquad.RescateProfundo.EditorTools
             return m;
         }
 
+        /// <summary>Fachada con ventanas: la emisión (ventanas encendidas) la activa CityDistrict al liberar el barrio.</summary>
+        private static Material FacadeMat(string name, Color tint)
+        {
+            Material m = Mat(name, tint, 0.05f, 0.35f, Color.black, false, "Fachada.png");
+            Texture2D lights = AssetDatabase.LoadAssetAtPath<Texture2D>(Root + "/Textures/FachadaLuces.png");
+            if (lights != null) m.SetTexture("_EmissionMap", lights);
+            EditorUtility.SetDirty(m);
+            return m;
+        }
+
         private static Material UnlitMat(string name, Color color, bool transparent)
         {
             string path = MatDir + "/" + name + ".mat";
@@ -343,7 +439,31 @@ namespace CatSquad.RescateProfundo.EditorTools
             UnlitMat("ChorroCombustible", new Color(1f, 0.55f, 0.1f, 0.9f), true);
             UnlitMat("ParticulaBurbuja", new Color(0.85f, 0.95f, 1f, 0.6f), true);
             UnlitMat("Cielo", new Color(0.62f, 0.84f, 0.97f), false);
+            Mat("PantallaBrillo", new Color(0.3f, 0.9f, 1f), 0f, 0.8f, new Color(0.6f, 1.8f, 2.2f));
+            Mat("MarcadorGuia", new Color(1f, 0.55f, 0.15f), 0f, 0.6f, new Color(2f, 1f, 0.3f));
+            if (FP)
+            {
+                // Pantalla del panel: muestra la cámara lateral (como la vista del Avance 1)
+                Material mapMat = UnlitMat("MapaLateral", Color.white, false);
+                RenderTexture rt = MapRenderTexture();
+                mapMat.SetTexture("_BaseMap", rt);
+                mapMat.SetTexture("_MainTex", rt);
+                EditorUtility.SetDirty(mapMat);
+
+                // Ciudad
+                Mat("Arena", new Color(0.86f, 0.8f, 0.64f), 0f, 0.2f, null, false, "Arena.png");
+                Mat("Asfalto", Color.white, 0f, 0.25f, null, false, "Asfalto.png");
+                Mat("Concreto", Color.white, 0f, 0.2f, null, false, "Concreto.png");
+                FacadeMat("FachadaCrema", new Color(1f, 0.93f, 0.78f));
+                FacadeMat("FachadaSalmon", new Color(1f, 0.72f, 0.6f));
+                FacadeMat("FachadaCeleste", new Color(0.72f, 0.86f, 1f));
+                FacadeMat("FachadaMenta", new Color(0.72f, 0.95f, 0.82f));
+                FacadeMat("FachadaLadrillo", new Color(0.85f, 0.5f, 0.38f));
+            }
             UnlitMat("AnilloCorriente", new Color(0.7f, 0.95f, 1f, 0.35f), true);
+            UnlitMat("RielLuz", new Color(0.35f, 1f, 0.85f, 0.55f), true);
+            Mat("MarcadorRiel", new Color(0.3f, 1f, 0.8f), 0f, 0.7f, new Color(0.5f, 2.4f, 1.8f));
+            Mat("Cascabel", new Color(1f, 0.78f, 0.2f), 0.9f, 0.8f, new Color(0.9f, 0.6f, 0.08f));
 
             // Paleta de los modelos (se reasigna por nombre de material del FBX)
             Mat("SubCasco", new Color(1f, 0.74f, 0.12f), 0.2f, 0.65f);
@@ -531,8 +651,16 @@ namespace CatSquad.RescateProfundo.EditorTools
             }
 
             // Límites invisibles del mar abierto
-            BoundsWall(level.transform, "LimiteIzq", new Vector3(-1.5f, 0f, 0f), new Vector3(1f, 40f, 6f));
-            BoundsWall(level.transform, "LimiteDer", new Vector3(W * C - 0.5f, 0f, 0f), new Vector3(1f, 40f, 6f));
+            float boundsDepth = FP ? SeaDepth3D + 4f : 6f;
+            BoundsWall(level.transform, "LimiteIzq", new Vector3(-1.5f, 0f, 0f), new Vector3(1f, 40f, boundsDepth));
+            BoundsWall(level.transform, "LimiteDer", new Vector3(W * C - 0.5f, 0f, 0f), new Vector3(1f, 40f, boundsDepth));
+
+            if (FP)
+            {
+                BuildClosures3D(level);
+                Debug.Log("[CatSquad] Paredes 3D: " + blocks + " bloques fusionados.");
+                return;
+            }
 
             // Pared del fondo del complejo
             float top = -8.5f * C;
@@ -562,11 +690,97 @@ namespace CatSquad.RescateProfundo.EditorTools
         {
             float x0 = c * C - C * 0.5f;
             float y0 = -r * C + C * 0.5f;
-            Vector3 center = new Vector3(x0 + w * C * 0.5f, y0 - h * C * 0.5f, (WallFront + WallBack) * 0.5f);
+            float zFront = WallFront, zBack = WallBack;
+            if (FP)
+            {
+                // En 3D el complejo tiene 10 m de fondo; el lecho marino se extiende todo el mar
+                float half = (rock ? SeaDepth3D : Depth3D) * 0.5f;
+                zFront = -half;
+                zBack = half;
+            }
+            Vector3 center = new Vector3(x0 + w * C * 0.5f, y0 - h * C * 0.5f, (zFront + zBack) * 0.5f);
             GameObject go = Primitive(PrimitiveType.Cube, (rock ? "Roca_" : "Muro_") + c + "_" + r, parent, center,
-                new Vector3(w * C, h * C, WallBack - WallFront), mats[rock ? "ParedRoca" : "ParedMetal"], true);
+                new Vector3(w * C, h * C, zBack - zFront), mats[rock ? "ParedRoca" : "ParedMetal"], true);
             go.AddComponent<WorldUVBox>().tileSize = rock ? 5f : 2f;
             go.isStatic = true;
+        }
+
+        /// <summary>
+        /// Primera persona: cierra el complejo por delante y por detrás (paredes de azulejos),
+        /// tapa el pozo de entrada (moon pool) fuera del ancho del complejo y pone límites al mar.
+        /// </summary>
+        private static void BuildClosures3D(GameObject level)
+        {
+            float half = Depth3D * 0.5f;
+            float top = -8.5f * C;             // borde superior del complejo (fila 9)
+            float bottom = -(H - 0.5f) * C;
+            float cx = (W * C) * 0.5f - 1f;
+            foreach (float sgn in new[] { -1f, 1f })
+            {
+                GameObject wall = Primitive(PrimitiveType.Cube, sgn < 0 ? "CierreFrontal" : "CierreTrasero", level.transform,
+                    new Vector3(cx, (top + bottom) * 0.5f, sgn * (half + 0.3f)), new Vector3(W * C, top - bottom, 0.6f), mats["FondoAzulejos"], true);
+                wall.AddComponent<WorldUVBox>().tileSize = 3f;
+                wall.isStatic = true;
+            }
+
+            // moon pool: solo abierto dentro del ancho del complejo
+            List<Vector2Int> pool = new List<Vector2Int>();
+            for (int r = 0; r < 9; r++)
+                for (int c = 0; c < W; c++)
+                    if (r >= 7 && At(c, r) != '#') pool.Add(new Vector2Int(c, r));
+            if (pool.Count > 0)
+            {
+                float x0 = float.MaxValue, x1 = float.MinValue, y0 = float.MaxValue, y1 = float.MinValue;
+                foreach (Vector2Int p in pool)
+                {
+                    x0 = Mathf.Min(x0, p.x * C - C * 0.5f); x1 = Mathf.Max(x1, p.x * C + C * 0.5f);
+                    y0 = Mathf.Min(y0, -p.y * C - C * 0.5f); y1 = Mathf.Max(y1, -p.y * C + C * 0.5f);
+                }
+                float seaHalf = SeaDepth3D * 0.5f;
+                float len = seaHalf - half;
+                foreach (float sgn in new[] { -1f, 1f })
+                {
+                    GameObject plug = Primitive(PrimitiveType.Cube, "TapaPozo", level.transform,
+                        new Vector3((x0 + x1) * 0.5f, (y0 + y1) * 0.5f, sgn * (half + len * 0.5f)),
+                        new Vector3(x1 - x0, y1 - y0, len), mats["ParedRoca"], true);
+                    plug.AddComponent<WorldUVBox>().tileSize = 5f;
+                    plug.isStatic = true;
+                }
+            }
+
+            // límites del mar en profundidad
+            float sh = SeaDepth3D * 0.5f;
+            BoundsWall(level.transform, "LimiteMarFrente", new Vector3(cx, -4f, -sh - 0.5f), new Vector3(W * C + 4f, 30f, 1f));
+            BoundsWall(level.transform, "LimiteMarFondo", new Vector3(cx, -4f, sh + 0.5f), new Vector3(W * C + 4f, 30f, 1f));
+        }
+
+        /// <summary>Primera persona: lámparas en los techos para que los pasillos no queden a oscuras.</summary>
+        private static void BuildCorridorLamps(GameObject level)
+        {
+            GameObject lamps = Child(level, "Lamparas");
+            int count = 0;
+            for (int r = 9; r < H; r++)
+            {
+                for (int c = 1; c < W - 1; c += 1)
+                {
+                    if (At(c, r) != '.' || At(c, r - 1) != '#') continue;
+                    if ((c * 7 + r * 3) % 5 != 0) continue;
+                    float z = ((c + r) % 2 == 0 ? -1f : 1f) * 2.6f;
+                    Vector3 pos = new Vector3(c * C, -r * C + C * 0.5f - 0.12f, z);
+                    GameObject fixture = Primitive(PrimitiveType.Cube, "Lampara", lamps.transform, pos, new Vector3(0.7f, 0.12f, 0.35f), mats["FaroLuz"]);
+                    fixture.isStatic = true;
+                    GameObject lg = new GameObject("Luz");
+                    lg.transform.SetParent(fixture.transform, false);
+                    lg.transform.position = pos + Vector3.down * 0.4f;
+                    Light l = lg.AddComponent<Light>();
+                    l.type = LightType.Point;
+                    l.range = 9f;
+                    l.intensity = 1.3f;
+                    l.color = (c % 3 == 0) ? new Color(0.6f, 0.95f, 1f) : new Color(1f, 0.85f, 0.6f);
+                    count++;
+                }
+            }
+            Debug.Log("[CatSquad] Lámparas: " + count);
         }
 
         private static void BoundsWall(Transform parent, string name, Vector3 pos, Vector3 size)
@@ -594,6 +808,27 @@ namespace CatSquad.RescateProfundo.EditorTools
             g.transform.position = p;
             g.AddComponent<Grate>();
             BoxCollider bc = g.AddComponent<BoxCollider>();
+            if (FP)
+            {
+                // Rejilla 3D: barrotes a lo largo de todo el fondo del complejo
+                bc.size = vertical ? new Vector3(0.35f, C, Depth3D) : new Vector3(C, 0.35f, Depth3D);
+                int n = Mathf.RoundToInt(Depth3D / 0.45f);
+                for (int i = 0; i <= n; i++)
+                {
+                    float z = -Depth3D * 0.5f + i * (Depth3D / n);
+                    GameObject bar = Primitive(PrimitiveType.Cylinder, "Barrote", g.transform, p + new Vector3(0f, 0f, z),
+                        vertical ? new Vector3(0.08f, C * 0.5f, 0.08f) : new Vector3(0.08f, C * 0.5f, 0.08f), mats["Rejilla"]);
+                    if (!vertical) bar.transform.rotation = Quaternion.Euler(0f, 0f, 90f);
+                    bar.isStatic = true;
+                }
+                foreach (float off in new[] { -C * 0.5f, C * 0.5f })
+                {
+                    Vector3 rail = vertical ? new Vector3(0f, off, 0f) : new Vector3(off, 0f, 0f);
+                    GameObject r = Primitive(PrimitiveType.Cube, "Riel", g.transform, p + rail, new Vector3(0.12f, 0.12f, Depth3D), mats["Rejilla"]);
+                    r.isStatic = true;
+                }
+                return;
+            }
             bc.size = vertical ? new Vector3(0.35f, C, 2.4f) : new Vector3(C, 0.35f, 2.4f);
 
             // Barrotes que atraviesan la profundidad (se ven de frente como una fila de puntos)
@@ -662,20 +897,35 @@ namespace CatSquad.RescateProfundo.EditorTools
             wz.maxLevel = maxLevel;
             wz.visualZFront = WallFront + 0.05f;
             wz.visualZBack = WallBack - 0.05f;
+            if (FP)
+            {
+                float halfZ = (id == "mar" ? SeaDepth3D : Depth3D) * 0.5f - 0.05f;
+                wz.visualZFront = -halfZ;
+                wz.visualZBack = halfZ;
+            }
 
-            GameObject body = Primitive(PrimitiveType.Cube, "Volumen", go.transform, Vector3.zero, Vector3.one, mats["Agua"]);
-            body.GetComponent<Renderer>().shadowCastingMode = ShadowCastingMode.Off;
             GameObject surf = Primitive(PrimitiveType.Cube, "Superficie", go.transform, Vector3.zero, Vector3.one, mats["AguaSuperficie"]);
             surf.GetComponent<Renderer>().shadowCastingMode = ShadowCastingMode.Off;
-            wz.waterBody = body.transform;
             wz.surface = surf.transform;
+            GameObject body = null;
+            if (!FP)
+            {
+                // En primera persona la cámara está DENTRO del agua: el volumen se sustituye por niebla
+                body = Primitive(PrimitiveType.Cube, "Volumen", go.transform, Vector3.zero, Vector3.one, mats["Agua"]);
+                body.GetComponent<Renderer>().shadowCastingMode = ShadowCastingMode.Off;
+                wz.waterBody = body.transform;
+            }
 
             // colocación inicial para verla en el editor
             float top = Mathf.Min(baseLevel, wz.max.y + 0.6f);
             float height = Mathf.Max(0.01f, top - wz.min.y);
-            body.transform.position = new Vector3((wz.min.x + wz.max.x) * 0.5f, wz.min.y + height * 0.5f, (wz.visualZFront + wz.visualZBack) * 0.5f);
-            body.transform.localScale = new Vector3(wz.max.x - wz.min.x, height, wz.visualZBack - wz.visualZFront);
-            surf.transform.position = new Vector3(body.transform.position.x, baseLevel, body.transform.position.z);
+            Vector3 bodyCenter = new Vector3((wz.min.x + wz.max.x) * 0.5f, wz.min.y + height * 0.5f, (wz.visualZFront + wz.visualZBack) * 0.5f);
+            if (body != null)
+            {
+                body.transform.position = bodyCenter;
+                body.transform.localScale = new Vector3(wz.max.x - wz.min.x, height, wz.visualZBack - wz.visualZFront);
+            }
+            surf.transform.position = new Vector3(bodyCenter.x, baseLevel, bodyCenter.z);
             surf.transform.localScale = new Vector3(wz.max.x - wz.min.x, 0.12f, wz.visualZBack - wz.visualZFront);
             return wz;
         }
@@ -700,19 +950,21 @@ namespace CatSquad.RescateProfundo.EditorTools
 
             foreach (Vector2Int cell in FindAll('M'))
             {
-                MaterialCrate crate = CreateCrate(t, cell);
+                MaterialCrate crate = CreateCrate(t, cell, cell == tutorialCrateCell ? 0f : RandZ());
                 if (cell == tutorialCrateCell) { crate.isTutorialCrate = true; items.tutorialCrate = crate; crate.name += "_Tutorial"; }
             }
 
             foreach (Vector2Int cell in FindAll('F'))
             {
-                FuelCanister f = CreateFuel(t, cell);
+                bool nook = cell.y >= 20 && cell.x <= 12;
+                FuelCanister f = CreateFuel(t, cell, nook ? 0f : RandZ());
                 if (cell.y >= 20 && cell.x <= 12) items.tutorialFuel.Add(f);
             }
 
             foreach (Vector2Int cell in FindAll('D'))
             {
-                Grabbable d = CreateDebris(t, cell);
+                bool nookD = cell.y >= 20 && cell.x <= 12;
+                Grabbable d = CreateDebris(t, cell, nookD ? 0f : RandZ());
                 if (cell.y >= 20 && cell.x <= 12) items.tutorialDebris.Add(d);
             }
 
@@ -721,6 +973,12 @@ namespace CatSquad.RescateProfundo.EditorTools
             items.pump1.waterTargets = new[] { new PumpWaterTarget { zone = zones["pozo"], levelFrom = -30.6f, levelTo = -17.4f } };
             items.pump2 = CreatePump(t, FindChar('Q'), "bomba2", "Bomba de la compuerta");
             items.pump2.gates = items.gate != null ? new[] { items.gate } : new FloodGate[0];
+
+            if (FP)
+            {
+                int b = 0;
+                foreach (Vector2Int cell in FindAll('$')) CreateSecretBell(t, cell, b++);
+            }
 
             string[] names = { "Mishi", "Pelusín", "Canela", "Nube", "Tofu", "Bigotes" };
             string[] furs = { "PelajeGris", "PelajeBlanco", "PelajeCanela", "PelajeNegro", "PelajeCrema", "GatoPelaje" };
@@ -738,14 +996,14 @@ namespace CatSquad.RescateProfundo.EditorTools
             {
                 for (int i = 0; i < 2; i++)
                 {
-                    Vector3 p = new Vector3(cell.x * C + (float)(rnd.NextDouble() - 0.5) * 1.4f, FloorBelow(cell), 0.8f + (float)rnd.NextDouble() * 1.8f);
+                    Vector3 p = new Vector3(cell.x * C + (float)(rnd.NextDouble() - 0.5) * 1.4f, FloorBelow(cell), DecoZ(cell, rnd, 0.8f + (float)rnd.NextDouble() * 1.8f));
                     GameObject a = Model("Alga.fbx", decoRoot.transform, p, 1.6f + (float)rnd.NextDouble() * 1.4f, null, true);
                     a.transform.rotation = Quaternion.Euler(0f, (float)rnd.NextDouble() * 360f, 0f);
                 }
             }
             foreach (Vector2Int cell in FindAll('o'))
             {
-                Vector3 p = new Vector3(cell.x * C, FloorBelow(cell) + 0.2f, 1.4f);
+                Vector3 p = new Vector3(cell.x * C, FloorBelow(cell) + 0.2f, DecoZ(cell, rnd, 1.4f));
                 GameObject rock = Model("Roca.fbx", decoRoot.transform, p, 1.6f + (float)rnd.NextDouble());
                 rock.transform.rotation = Quaternion.Euler(0f, (float)rnd.NextDouble() * 360f, 0f);
                 Vector3 cp = p + new Vector3(1f, 0f, 0.6f);
@@ -761,6 +1019,23 @@ namespace CatSquad.RescateProfundo.EditorTools
         /// entre el 70 % y el 90 % del alcance.
         /// </summary>
         private const float FieldRadius = 2.2f;
+
+        /// <summary>Z de la decoración: detrás en la vista lateral; repartida por todo el fondo en 3D.</summary>
+        private static float DecoZ(Vector2Int cell, System.Random rnd, float lateralZ)
+        {
+            if (!FP) return lateralZ;
+            float half = (cell.y < 9 ? SeaDepth3D * 0.4f : Depth3D * 0.5f - 0.8f);
+            return ((float)rnd.NextDouble() * 2f - 1f) * half;
+        }
+
+        /// <summary>Primera persona: el objetivo ancla al submarino a 70-90 % del alcance, en direcciones que van rotando.</summary>
+        private static void AddReachAnchor(GameObject root, Grabbable target)
+        {
+            ReachAnchor ra = root.AddComponent<ReachAnchor>();
+            ra.target = target;
+            ra.preferredDirection = anchorCounter % WorkPose.Directions.Length;
+            anchorCounter += 3; // salta direcciones para que las vecinas sean distintas
+        }
 
         private static GameObject CreateCurrentField(Transform parent, Vector3 center, float radius, string name)
         {
@@ -789,9 +1064,11 @@ namespace CatSquad.RescateProfundo.EditorTools
             return root;
         }
 
-        private static MaterialCrate CreateCrate(Transform parent, Vector2Int cell)
+        private static MaterialCrate CreateCrate(Transform parent, Vector2Int cell, float z = 0f)
         {
-            Vector3 pos = new Vector3(cell.x * C, FloorY(cell, 0.45f), 0f);
+            Vector3 pos = new Vector3(cell.x * C, FloorY(cell, 0.45f), z);
+            // En 3D, las cajas de los nichos del suelo quedan pegadas a la rejilla para seguir al alcance del brazo
+            if (FP && At(cell.x, cell.y - 1) == '-') pos.y = -cell.y * C + 0.45f;
             GameObject root = GrabbableRoot(parent, "CajaChatarra_" + cell.x + "_" + cell.y, pos, 2f);
             Model("CajaChatarra.fbx", root.transform, pos + Vector3.down * 0.45f, 1.15f);
             BoxCollider bc = root.AddComponent<BoxCollider>();
@@ -808,13 +1085,14 @@ namespace CatSquad.RescateProfundo.EditorTools
             glow.range = 2.6f;
             glow.intensity = 1.4f;
             glow.color = new Color(1f, 0.8f, 0.3f);
-            crate.currentField = CreateCurrentField(parent, pos, FieldRadius, "Corriente_" + root.name);
+            if (FP) AddReachAnchor(root, crate);
+            else crate.currentField = CreateCurrentField(parent, pos, FieldRadius, "Corriente_" + root.name);
             return crate;
         }
 
-        private static FuelCanister CreateFuel(Transform parent, Vector2Int cell)
+        private static FuelCanister CreateFuel(Transform parent, Vector2Int cell, float z = 0f)
         {
-            Vector3 pos = new Vector3(cell.x * C, FloorY(cell, 0.42f), 0f);
+            Vector3 pos = new Vector3(cell.x * C, FloorY(cell, 0.42f), z);
             GameObject root = GrabbableRoot(parent, "Bidon_" + cell.x + "_" + cell.y, pos, 1f);
             GameObject model = Model("Bidon.fbx", root.transform, pos, 0.95f);
             BoxCollider bc = root.AddComponent<BoxCollider>();
@@ -829,9 +1107,9 @@ namespace CatSquad.RescateProfundo.EditorTools
             return f;
         }
 
-        private static Grabbable CreateDebris(Transform parent, Vector2Int cell)
+        private static Grabbable CreateDebris(Transform parent, Vector2Int cell, float z = 0f)
         {
-            Vector3 pos = new Vector3(cell.x * C, -cell.y * C, 0f);
+            Vector3 pos = new Vector3(cell.x * C, -cell.y * C, z);
             GameObject root = GrabbableRoot(parent, "Escombro_" + cell.x + "_" + cell.y, pos, 3f);
             GameObject model = Model("Escombro.fbx", root.transform, pos, 1.7f);
             model.transform.rotation = Quaternion.Euler(0f, 0f, (cell.x * 37 % 20) - 10f);
@@ -849,7 +1127,7 @@ namespace CatSquad.RescateProfundo.EditorTools
         private static PumpStation CreatePump(Transform parent, Vector2Int cell, string id, string display)
         {
             float floor = -cell.y * C - C * 0.5f;
-            Vector3 pos = new Vector3(cell.x * C, floor, 0f);
+            Vector3 pos = new Vector3(cell.x * C, floor, FP ? 2.2f : 0f);
             GameObject root = new GameObject("Bomba_" + id);
             root.transform.SetParent(parent, false);
             root.transform.position = pos;
@@ -920,7 +1198,7 @@ namespace CatSquad.RescateProfundo.EditorTools
         private static void CreateKittenCage(Transform parent, Vector2Int cell, string id, string name, string fur)
         {
             float floor = -cell.y * C - C * 0.5f;
-            Vector3 pos = new Vector3(cell.x * C, floor, 0f);
+            Vector3 pos = new Vector3(cell.x * C, floor, RandZ(2.4f));
             GameObject root = new GameObject("Jaula_" + name);
             root.transform.SetParent(parent, false);
             root.transform.position = pos;
@@ -946,6 +1224,7 @@ namespace CatSquad.RescateProfundo.EditorTools
             agent.body.maxSpeed = 6.5f;
             agent.body.maxForce = 16f;
             agent.body.mass = 0.5f;
+            agent.body.lockToPlane = !FP;
             agent.bobAmplitude = 0.06f;
             RescuedKitten rk = kitten.AddComponent<RescuedKitten>();
             rk.kittenId = id;
@@ -954,7 +1233,7 @@ namespace CatSquad.RescateProfundo.EditorTools
 
             // cerrojo del lado con agua libre
             int side = At(cell.x - 1, cell.y) == '.' || At(cell.x - 1, cell.y) == 'w' ? -1 : 1;
-            Vector3 latchPos = pos + new Vector3(side * 0.95f, 0.75f, -0.2f);
+            Vector3 latchPos = pos + new Vector3(side * 0.95f, 0.75f, FP ? 0f : -0.2f);
             GameObject latchRoot = GrabbableRoot(parent, "Cerrojo_" + name, latchPos, 0.5f);
             Model("Cerrojo.fbx", latchRoot.transform, latchPos, 0.55f);
             BoxCollider lc = latchRoot.AddComponent<BoxCollider>();
@@ -965,7 +1244,48 @@ namespace CatSquad.RescateProfundo.EditorTools
             latch.cage = cage;
             latch.holdOffset = Vector3.zero;
             cage.latch = latch;
-            cage.currentField = CreateCurrentField(parent, latchPos, FieldRadius, "Corriente_" + name);
+            if (FP) AddReachAnchor(latchRoot, latch);
+            else cage.currentField = CreateCurrentField(parent, latchPos, FieldRadius, "Corriente_" + name);
+        }
+
+        /// <summary>
+        /// Cascabel dorado secreto: en bolsillos del mapa lejos de los rieles y pegado al fondo o al
+        /// frente del pasillo (Z), para que el modo automático nunca pase por encima.
+        /// </summary>
+        private static void CreateSecretBell(Transform parent, Vector2Int cell, int index)
+        {
+            float z = rows == CityLayout.Rows ? SecretBellZ(cell) : (cell.y < 9 ? -12f : (index % 2 == 0 ? 3.4f : -3.4f));
+            Vector3 pos = new Vector3(cell.x * C, -cell.y * C, z);
+            GameObject root = new GameObject("CascabelSecreto_" + (index + 1));
+            root.transform.SetParent(parent, false);
+            root.transform.position = pos;
+            SphereCollider sc = root.AddComponent<SphereCollider>();
+            sc.isTrigger = true;
+            sc.radius = 1.1f;
+
+            GameObject visual = new GameObject("Visual");
+            visual.transform.SetParent(root.transform, false);
+            GameObject body = Primitive(PrimitiveType.Sphere, "Campana", visual.transform, pos, new Vector3(0.62f, 0.55f, 0.62f), mats["Cascabel"]);
+            body.transform.localPosition = Vector3.zero;
+            GameObject band = Primitive(PrimitiveType.Cylinder, "Franja", visual.transform, pos, new Vector3(0.66f, 0.03f, 0.66f), mats["Cascabel"]);
+            band.transform.localPosition = new Vector3(0f, 0.02f, 0f);
+            GameObject loop = Primitive(PrimitiveType.Cylinder, "Argolla", visual.transform, pos, new Vector3(0.14f, 0.06f, 0.14f), mats["Cascabel"]);
+            loop.transform.localPosition = new Vector3(0f, 0.3f, 0f);
+            GameObject slot = Primitive(PrimitiveType.Cube, "Ranura", visual.transform, pos, new Vector3(0.5f, 0.05f, 0.08f), mats["SubOscuro"]);
+            slot.transform.localPosition = new Vector3(0f, -0.14f, 0f);
+
+            Light glow = new GameObject("Brillo").AddComponent<Light>();
+            glow.transform.SetParent(root.transform, false);
+            glow.type = LightType.Point;
+            glow.range = 4.5f;
+            glow.intensity = 1.8f;
+            glow.color = new Color(1f, 0.8f, 0.3f);
+
+            SecretBell bell = root.AddComponent<SecretBell>();
+            bell.secretId = "cascabel_" + cell.x + "_" + cell.y;
+            bell.visual = visual.transform;
+            bell.glow = glow;
+            bell.shardMaterial = mats["Fragmento"];
         }
 
         private static void CreateFish(Transform parent, Vector2Int cell, System.Random rnd)
@@ -973,7 +1293,8 @@ namespace CatSquad.RescateProfundo.EditorTools
             int n = 2 + rnd.Next(2);
             for (int i = 0; i < n; i++)
             {
-                Vector3 pos = CellCenter(cell) + new Vector3((float)(rnd.NextDouble() - 0.5) * 2f, (float)(rnd.NextDouble() - 0.5) * 1.5f, -0.4f + (float)rnd.NextDouble() * 2f);
+                Vector3 pos = CellCenter(cell) + new Vector3((float)(rnd.NextDouble() - 0.5) * 2f, (float)(rnd.NextDouble() - 0.5) * 1.5f,
+                    FP ? DecoZ(cell, rnd, 0f) : -0.4f + (float)rnd.NextDouble() * 2f);
                 GameObject fish = new GameObject("Pez");
                 fish.transform.SetParent(parent, false);
                 fish.transform.position = pos;
@@ -986,6 +1307,7 @@ namespace CatSquad.RescateProfundo.EditorTools
                 a.yawWhenMovingRight = 95f;
                 a.bobAmplitude = 0.05f;
                 a.pitchByVerticalSpeed = 20f;
+                a.body.lockToPlane = !FP;
                 fish.AddComponent<CuriousFish>();
             }
         }
@@ -1001,10 +1323,11 @@ namespace CatSquad.RescateProfundo.EditorTools
             rb.mass = 5f;
             rb.useGravity = false;
             rb.linearDamping = 0.5f;
-            rb.constraints = RigidbodyConstraints.FreezePositionZ | RigidbodyConstraints.FreezeRotation;
+            rb.constraints = FP ? RigidbodyConstraints.FreezeRotation : RigidbodyConstraints.FreezePositionZ | RigidbodyConstraints.FreezeRotation;
             rb.interpolation = RigidbodyInterpolation.Interpolate;
+            if (FP) root.transform.rotation = Quaternion.Euler(0f, 90f, 0f); // mira hacia +X (hacia la guía)
             CapsuleCollider cap = root.AddComponent<CapsuleCollider>();
-            cap.direction = 0;
+            cap.direction = FP ? 2 : 0; // en 3D el casco gira con la raíz: eje largo = Z local
             cap.radius = 0.62f;
             cap.height = 2.75f;
             PhysicsMaterial slide = AssetDatabase.LoadAssetAtPath<PhysicsMaterial>(MatDir + "/SubDeslizante.asset");
@@ -1016,7 +1339,7 @@ namespace CatSquad.RescateProfundo.EditorTools
             cap.sharedMaterial = slide;
 
             GameObject visual = Child(root, "Visual");
-            visual.transform.localRotation = Quaternion.Euler(0f, 100f, 0f);
+            visual.transform.localRotation = FP ? Quaternion.identity : Quaternion.Euler(0f, 100f, 0f);
             GameObject pivot = Child(visual, "ModelPivot");
             GameObject model = Model("Submarino.fbx", pivot.transform, spawn, 2.9f);
             model.transform.localPosition = Vector3.zero;
@@ -1029,8 +1352,11 @@ namespace CatSquad.RescateProfundo.EditorTools
             pilot.name = "GatoPiloto";
             pilot.transform.localRotation = Quaternion.identity;
             pilot.transform.position = seatPos + Vector3.down * 0.28f;
+            // En primera persona el piloto eres tú: el gato solo se ve en el mapa lateral (capa propia)
+            if (FP) SetLayerRecursive(pilot, LayerSoloMapa);
 
             SubmarineController sub = root.AddComponent<SubmarineController>();
+            if (FP) sub.surfaceOffset = 0.2f; // la cúpula asoma sobre el agua al emerger
             sub.visual = visual.transform;
             sub.propeller = FindDeep(model.transform, "Helice");
 
@@ -1140,7 +1466,7 @@ namespace CatSquad.RescateProfundo.EditorTools
         {
             GameObject root = new GameObject("CapitanaPelusa");
             root.transform.SetParent(parent.transform, false);
-            root.transform.position = new Vector3(pos.x, pos.y, -0.6f);
+            root.transform.position = new Vector3(pos.x, pos.y, FP ? 0f : -0.6f);
             GameObject visual = Model("GatoGuia.fbx", root.transform, root.transform.position, 1.35f, null, true);
             visual.name = "Visual";
             SteeringAgent agent = root.AddComponent<SteeringAgent>();
@@ -1148,6 +1474,7 @@ namespace CatSquad.RescateProfundo.EditorTools
             agent.body.maxSpeed = 4.5f;
             agent.body.maxForce = 11f;
             agent.body.mass = 0.5f;
+            agent.body.lockToPlane = !FP;
             agent.bobAmplitude = 0.12f;
             agent.yawWhenMovingRight = 120f;
             GuideCat guide = root.AddComponent<GuideCat>();
@@ -1206,6 +1533,125 @@ namespace CatSquad.RescateProfundo.EditorTools
             return dock;
         }
 
+        // ================================================================== cabina en primera persona
+
+        private static Camera BuildCockpitCamera(SubmarineController sub)
+        {
+            GameObject camGo = new GameObject("CamaraCabina");
+            camGo.tag = "MainCamera";
+            camGo.transform.SetParent(sub.transform, false);
+            Transform seat = FindDeep(sub.transform, "AsientoPiloto");
+            Vector3 local = seat != null ? sub.transform.InverseTransformPoint(seat.position) : new Vector3(0f, 0f, 0.55f);
+            camGo.transform.localPosition = new Vector3(0f, local.y + 0.42f, local.z + 0.05f);
+            camGo.transform.localRotation = Quaternion.Euler(6f, 0f, 0f);
+
+            Camera cam = camGo.AddComponent<Camera>();
+            cam.fieldOfView = 70f;
+            cam.nearClipPlane = 0.05f;
+            cam.farClipPlane = 220f;
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = new Color(0.16f, 0.42f, 0.55f);
+            camGo.AddComponent<AudioListener>();
+
+            // Cabina: tablero, marco, palanca y brazo del mapa (modelada con la cámara en el origen)
+            GameObject cockpit = Model("Cabina.fbx", camGo.transform, camGo.transform.position, 0f);
+            cockpit.transform.localPosition = Vector3.zero;
+            cockpit.transform.localRotation = Quaternion.identity;
+            foreach (Renderer r in cockpit.GetComponentsInChildren<Renderer>(true)) r.shadowCastingMode = ShadowCastingMode.Off;
+
+            // En primera persona los fragmentos vuelan hacia la cabina (se ven llegar)
+            GameObject hatch = new GameObject("TolvaCabina");
+            hatch.transform.SetParent(camGo.transform, false);
+            hatch.transform.localPosition = new Vector3(0f, -0.5f, 0.7f);
+            sub.cargoPort = hatch.transform;
+
+            CockpitRig rig = camGo.AddComponent<CockpitRig>();
+            rig.lever = FindDeep(cockpit.transform, "Palanca");
+            // Panel del mapa junto a la palanca: se pliega hacia delante sobre el tablero (M)
+            rig.mapArm = FindDeep(cockpit.transform, "PanelMapa");
+            rig.stowAngle = 78f;
+            rig.mapMin = new Vector2(-C * 0.5f, -(H - 0.5f) * C);
+            rig.mapMax = new Vector2((W - 0.5f) * C, C * 0.5f);
+
+            Transform screenPoint = FindDeep(cockpit.transform, "PantallaMapa");
+            if (screenPoint != null)
+            {
+                // Pantalla = la cámara lateral del primer prototipo, que sigue al submarino
+                GameObject quad = Primitive(PrimitiveType.Quad, "PantallaMapaLateral", screenPoint, screenPoint.position, Vector3.one, mats["MapaLateral"]);
+                quad.transform.localPosition = Vector3.zero;
+                quad.transform.localRotation = Quaternion.identity;
+                quad.transform.localScale = new Vector3(0.37f, 0.37f * 520f / 800f, 1f);
+                quad.GetComponent<Renderer>().shadowCastingMode = ShadowCastingMode.Off;
+                rig.mapScreen = quad.GetComponent<Renderer>();
+
+                // Botones del panel (se manejan con los pulgares): AUTO, LUCES, PISTA, ZOOM, BALSA
+                CockpitPanel panel = camGo.AddComponent<CockpitPanel>();
+                panel.rig = rig;
+                panel.screen = rig.mapScreen;
+            }
+
+            // Capas: la cabina no sale en el mapa lateral; el gato piloto solo sale en el mapa
+            NameLayer(LayerCabina, "Cabina");
+            NameLayer(LayerSoloMapa, "SoloMapa");
+            SetLayerRecursive(cockpit, LayerCabina);
+            cam.cullingMask = ~(1 << LayerSoloMapa);
+            return cam;
+        }
+
+        /// <summary>Genera la textura del mapa simplificado a partir del ASCII (4 píxeles por celda).</summary>
+        private static Texture2D CreateMapTexture()
+        {
+            const int k = 4;
+            Texture2D tex = new Texture2D(W * k, H * k);
+            Color rock = new Color(0.36f, 0.33f, 0.3f), metal = new Color(0.22f, 0.28f, 0.34f);
+            Color air = new Color(0.62f, 0.84f, 0.97f), water = new Color(0.08f, 0.3f, 0.48f);
+            for (int r = 0; r < H; r++)
+            {
+                for (int c = 0; c < W; c++)
+                {
+                    char ch = At(c, r);
+                    Color col;
+                    if (ch == '#') col = r < 9 ? rock : metal;
+                    else if (r <= 2) col = air;
+                    else col = water;
+                    Color dot = col;
+                    bool isDot = true;
+                    switch (ch)
+                    {
+                        case 'M': dot = new Color(1f, 0.8f, 0.2f); break;
+                        case 'F': dot = new Color(0.9f, 0.2f, 0.15f); break;
+                        case 'P': case 'Q': dot = new Color(0.2f, 1f, 0.5f); break;
+                        case 'K': dot = new Color(1f, 0.55f, 0.8f); break;
+                        case 'G': dot = new Color(1f, 0.6f, 0.1f); isDot = false; col = dot; break;
+                        case '|': case '-': dot = new Color(0.75f, 0.78f, 0.8f); isDot = false; col = water * 1.3f; break;
+                        case 'S': dot = Color.white; break;
+                        default: isDot = false; break;
+                    }
+                    for (int y = 0; y < k; y++)
+                    {
+                        for (int x = 0; x < k; x++)
+                        {
+                            bool center = x >= 1 && x <= 2 && y >= 1 && y <= 2;
+                            tex.SetPixel(c * k + x, (H - 1 - r) * k + y, isDot && center ? dot : col);
+                        }
+                    }
+                }
+            }
+            tex.Apply();
+            string path = Root + "/Textures/MapaNivel.png";
+            File.WriteAllBytes(Path.Combine(Path.GetDirectoryName(Application.dataPath), path), tex.EncodeToPNG());
+            AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceSynchronousImport);
+            TextureImporter ti = AssetImporter.GetAtPath(path) as TextureImporter;
+            if (ti != null)
+            {
+                ti.filterMode = FilterMode.Point;
+                ti.mipmapEnabled = false;
+                ti.wrapMode = TextureWrapMode.Clamp;
+                ti.SaveAndReimport();
+            }
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+        }
+
         private static Camera BuildCamera(GameObject systems, Transform target)
         {
             GameObject go = new GameObject("Main Camera");
@@ -1235,6 +1681,7 @@ namespace CatSquad.RescateProfundo.EditorTools
         {
             GameObject gmGo = Child(root, "GameManager");
             GameManager gm = gmGo.AddComponent<GameManager>();
+            gm.viewMode = FP ? ViewMode.PrimeraPersona : ViewMode.Lateral25D;
 
             GameObject inputGo = Child(root, "EntradaBimanual");
             BimanualInput input = inputGo.AddComponent<BimanualInput>();
@@ -1253,9 +1700,9 @@ namespace CatSquad.RescateProfundo.EditorTools
             dockPoint.transform.position = subSpawn;
 
             Transform dive1 = Child(root, "Bajada1").transform;
-            dive1.position = new Vector3(subSpawn.x, -12f, 0f);
+            dive1.position = new Vector3(subSpawn.x, FP ? -9f : -12f, 0f);
             Transform dive2 = Child(root, "Bajada2").transform;
-            dive2.position = new Vector3(subSpawn.x, -18.5f, 0f);
+            dive2.position = new Vector3(subSpawn.x + (FP ? 4f : 0f), FP ? -12f : -18.5f, 0f);
 
             session.tutorial = tutorial;
             session.calibration = calib;
@@ -1263,14 +1710,20 @@ namespace CatSquad.RescateProfundo.EditorTools
             session.diveRoute = new[] { dive1, dive2 };
 
             tutorial.session = session;
-            tutorial.hallZone = zones["muelle"];
-            tutorial.storageZone = zones["almacen"];
+            tutorial.hallZone = FP ? zones["mar"] : zones["muelle"];
+            tutorial.storageZone = FP ? zones["barrio1"] : zones["almacen"];
+            if (FP && city != null)
+            {
+                tutorial.cityMode = true;
+                tutorial.firstDistrict = zones["barrio1"];
+                tutorial.firstLock = city.locks.Count > 0 ? city.locks[0] : null;
+            }
             tutorial.tutorialCrate = items.tutorialCrate;
             tutorial.tutorialDebris = items.tutorialDebris.ToArray();
             tutorial.tutorialFuel = items.tutorialFuel.ToArray();
             tutorial.tutorialPump = items.pump1;
             GameObject gStart = Child(root, "GuiaInicio");
-            gStart.transform.position = subSpawn + new Vector3(18f, 0.6f, -0.6f);
+            gStart.transform.position = subSpawn + new Vector3(18f, 0.6f, FP ? 0f : -0.6f);
             GameObject gDock = Child(root, "GuiaMuelle");
             gDock.transform.position = subSpawn + new Vector3(3.6f, 0.2f, 0f);
             tutorial.guideStart = gStart.transform;
@@ -1279,7 +1732,9 @@ namespace CatSquad.RescateProfundo.EditorTools
             tutorial.crateSpot = Get(points, 'b');
             tutorial.debrisSpot = Get(points, 'c');
             tutorial.pumpSpot = Get(points, 'd');
-            tutorial.shaftRoute = new[] { Get(points, 'e'), Get(points, 'g'), Get(points, 'h'), Get(points, 'i') };
+            tutorial.shaftRoute = FP
+                ? new[] { Get(points, 'e'), Get(points, 'g') }
+                : new[] { Get(points, 'e'), Get(points, 'g'), Get(points, 'h'), Get(points, 'i') };
 
             guide.transform.position = gStart.transform.position;
 
@@ -1312,6 +1767,13 @@ namespace CatSquad.RescateProfundo.EditorTools
             PressureLimitVisual plv = pressure.AddComponent<PressureLimitVisual>();
             plv.minX = 62f;
             plv.maxX = W * C - 1f;
+            if (FP)
+            {
+                plv.depthZ = AvenueHalf * 2f;
+                plv.zPosition = 0f;
+            }
+
+            if (FP) BuildRails(root, items);
 
             gm.submarine = sub;
             gm.arm = arm;
@@ -1321,6 +1783,48 @@ namespace CatSquad.RescateProfundo.EditorTools
             gm.metrics = metrics;
             gm.hud = hud;
             gm.dockPoint = dockPoint.transform;
+        }
+
+        /// <summary>Modo automático: red de rieles (desde el mismo mapa ASCII) y el piloto que la recorre.</summary>
+        private static void BuildRails(GameObject root, LevelItems items)
+        {
+            GameObject go = Child(root, "Rieles");
+            RailNetwork net = go.AddComponent<RailNetwork>();
+            net.rows = (string[])rows.Clone();
+            net.cellSize = C;
+            net.gate = items.gate;
+            if (city != null)
+            {
+                net.gateColumns = city.gateColumns.ToArray();
+                net.gateDoors = city.gateDoors.ToArray();
+            }
+
+            RailPilot pilot = go.AddComponent<RailPilot>();
+            pilot.network = net;
+
+            GameObject lineGo = Child(go, "RielDeLuz");
+            LineRenderer line = lineGo.AddComponent<LineRenderer>();
+            line.useWorldSpace = true;
+            line.widthMultiplier = 0.14f;
+            line.numCornerVertices = 3;
+            line.numCapVertices = 3;
+            line.sharedMaterial = mats["RielLuz"];
+            line.shadowCastingMode = ShadowCastingMode.Off;
+            line.receiveShadows = false;
+            line.positionCount = 0;
+            line.enabled = false;
+            pilot.railLine = line;
+
+            GameObject beacon = Primitive(PrimitiveType.Sphere, "BalizaRiel", go.transform, Vector3.zero, Vector3.one * 0.3f, mats["MarcadorRiel"]);
+            beacon.GetComponent<Renderer>().shadowCastingMode = ShadowCastingMode.Off;
+            Light bl = new GameObject("Luz").AddComponent<Light>();
+            bl.transform.SetParent(beacon.transform, false);
+            bl.type = LightType.Point;
+            bl.range = 3f;
+            bl.intensity = 1.2f;
+            bl.color = new Color(0.4f, 1f, 0.85f);
+            beacon.SetActive(false);
+            pilot.beacon = beacon.transform;
         }
 
         private static Transform Get(Dictionary<char, Transform> d, char c)

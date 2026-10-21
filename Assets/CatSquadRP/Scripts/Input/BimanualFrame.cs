@@ -47,6 +47,27 @@ namespace CatSquad.RescateProfundo
         public float speed;
     }
 
+    public enum HelmMode
+    {
+        Suelta = 0,        // mano abierta: no sostiene la palanca (el submarino baja)
+        Estacionaria = 1,  // mano relajada/semicerrada con la palma hacia abajo: girar, subir; sin avanzar
+        Avance = 2         // mano en vertical (como un "like" sin pulgar): avanza; pulgar arriba = retroceder
+    }
+
+    /// <summary>Timón de la cabina en primera persona (lo produce la mano del PANEL).</summary>
+    [System.Serializable]
+    public struct HelmFrame
+    {
+        public bool tracked;
+        public HelmMode mode;
+        /// <summary>-1 izquierda .. 1 derecha</summary>
+        public float turn;
+        /// <summary>-1 retroceder .. 1 avanzar</summary>
+        public float throttle;
+        /// <summary>-1 bajar .. 1 subir</summary>
+        public float vertical;
+    }
+
     /// <summary>Lectura bimanual completa de un frame.</summary>
     [System.Serializable]
     public struct BimanualFrame
@@ -56,6 +77,28 @@ namespace CatSquad.RescateProfundo
 
         /// <summary>Mano manipuladora: brazo robótico (alcanzar, sujetar, verter, soltar).</summary>
         public HandFrame manip;
+
+        /// <summary>Timón (solo primera persona).</summary>
+        public HelmFrame helm;
+
+        /// <summary>
+        /// Panel de cabina con los PULGARES. Los proveedores (teclado o webcam) solo informan el estado
+        /// sostenido de cada pulgar y si ambas manos están en la pose de reposo (relajadas, palma abajo);
+        /// BimanualInput los interpreta y genera los eventos:
+        ///   · un pulgar solo arriba  → mover la selección (-1 izquierda, 1 derecha)
+        ///   · ambos pulgares arriba  → confirmar
+        /// </summary>
+        public int panelNavigate;
+        public bool panelConfirm;
+        public bool panelToggle;
+        public bool thumbLeft;
+        public bool thumbRight;
+        /// <summary>Ambas manos relajadas con la palma abajo (en teclado siempre true).</summary>
+        public bool panelHandsReady;
+        /// <summary>Ambos pulgares arriba sostenidos (para mostrar el progreso de la confirmación).</summary>
+        public float bothThumbs01;
+        /// <summary>Meñique arriba con la mano del panel (atajo opcional).</summary>
+        public bool pinkyPanel;
 
         /// <summary>Compensación de tronco normalizada (1 = en el umbral).</summary>
         public float trunkCompensation;
@@ -72,5 +115,12 @@ namespace CatSquad.RescateProfundo
         public Vector3 armBaseWorld;
         public float armReachWorld;
         public float gamePlaneZ;
+
+        // Primera persona: el brazo trabaja en un plano perpendicular a la mirada
+        public bool firstPerson;
+        public Vector3 armRight;
+        public Vector3 armUp;
+        public Vector3 armForward;
+        public float armPlaneDepth;
     }
 }

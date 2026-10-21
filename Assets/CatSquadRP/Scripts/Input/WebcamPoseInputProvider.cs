@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -20,6 +21,13 @@ namespace CatSquad.RescateProfundo
         public int handL, handR;  // 1 si se detectó esa mano
         public float openL, openR;   // 0 = puño cerrado, 1 = mano abierta
         public float rollL, rollR;   // rotación del antebrazo estimada (grados)
+        // Forma de la mano en 3D (etapa 4: gestos). Ver hand_shape() en el puente Python.
+        public float[] nL, nR;       // normal que sale de la palma (x espejada, y hacia abajo)
+        public float[] extL, extR;   // extensión de cada dedo [pulgar, índice, medio, anular, meñique]
+        public float open3L = 1f, open3R = 1f;   // apertura 3D (0 puño, 1 abierta)
+        public float tliftL, tliftR; // pulgar separado de la palma hacia el dorso
+        public float tupL, tupR;     // punta del pulgar más arriba que su base
+        public float[] hcL, hcR;     // centro de cada mano (espejo, normalizado) para "juntar las manos"
     }
 
     [Serializable]
@@ -28,6 +36,16 @@ namespace CatSquad.RescateProfundo
         public bool valid;
         public ReachEnvelope manipEnvelope = new ReachEnvelope(1.2f);
         public ReachEnvelope panelEnvelope = new ReachEnvelope(0.45f);
+
+        // ---- Etapa 4: calibración POR GESTO (plantillas propias de cada niño)
+        public List<GestureTemplate> gestures = new List<GestureTemplate>();
+        [Tooltip("Distancia entre manos (en anchos de hombro) por debajo de la cual cuentan como 'juntas'")]
+        public float handsTogether = 0.45f;
+        [Tooltip("Apertura 3D de la mano del brazo: por debajo cierra la pinza, por encima la abre")]
+        public float gripClose3 = 0.2f;
+        public float gripOpen3 = 0.4f;
+
+        public bool HasGestures { get { return gestures != null && gestures.Count > 0; } }
     }
 
     /// <summary>
@@ -93,6 +111,32 @@ namespace CatSquad.RescateProfundo
 
         private Vector2 smoothL, smoothR;
         private bool smoothInit;
+
+        // ---- gestos (etapa 4)
+        private readonly GestureRecognizer recognizer = new GestureRecognizer();
+        private bool togetherArmed = true;
+        private float togetherTime;
+        private HandGesture capture = HandGesture.Desconocido;
+        private string captureSpecial;
+        private BodySide[] captureSides = new BodySide[0];
+        private readonly float[][] captureSum = { new float[GestureFeatures.Count], new float[GestureFeatures.Count] };
+        private readonly int[] captureCount = new int[2];
+        private float captureScalarSum;
+        private int captureScalarCount;
+
+        public HandGesture GestureLeft { get; private set; }
+        public HandGesture GestureRight { get; private set; }
+        public float GestureDistanceLeft { get { return recognizer.Distance(BodySide.Izquierdo); } }
+        public float GestureDistanceRight { get { return recognizer.Distance(BodySide.Derecho); } }
+        /// <summary>Distancia entre las manos en anchos de hombro (o -1 si no se ven ambas).</summary>
+        public float HandsDistance { get; private set; }
+        public bool IsCapturing { get { return capture != HandGesture.Desconocido || captureSpecial != null; } }
+
+        /// <summary>Carga las plantillas guardadas (o las de por defecto).</summary>
+        public void ApplyGestureCalibration()
+        {
+            recognizer.SetTemplates(calibration != null ? calibration.gestures : null);
+        }
         private bool gripStateL, gripStateR;
         private Vector2 lastManipOffset;
 
@@ -320,12 +364,17 @@ namespace CatSquad.RescateProfundo
 
             bool manipHandSeen = panelIsLeft ? packet.handR == 1 : packet.handL == 1;
             float manipOpen = panelIsLeft ? packet.openR : packet.openL;
+            // Con la forma 3D (etapa 4) la apertura no se confunde cuando los dedos apuntan a la cámara
+            bool has3D = (panelIsLeft ? packet.nR : packet.nL) != null;
+            float closeBelow = has3D ? calibration.gripClose3 : gripCloseBelow;
+            float openAbove = has3D ? calibration.gripOpen3 : gripOpenAbove;
+            if (has3D) manipOpen = panelIsLeft ? packet.open3R : packet.open3L;
             frame.manip.gripKnown = manipHandSeen;
             if (manipHandSeen)
             {
                 bool state = panelIsLeft ? gripStateR : gripStateL;
-                if (state && manipOpen > gripOpenAbove) state = false;
-                else if (!state && manipOpen < gripCloseBelow) state = true;
+                if (state && manipOpen > openAbove) state = false;
+                else if (!state && manipOpen < closeBelow) state = true;
                 if (panelIsLeft) gripStateR = state; else gripStateL = state;
                 frame.manip.grip = state;
 
@@ -359,6 +408,86 @@ namespace CatSquad.RescateProfundo
             frame.panel.lever = stick.y >= leverThreshold;
             frame.panel.gripKnown = false;
 
+            // ---- Gestos de cada mano (etapa 4)
+            GestureFeatures fL = GestureFeatures.From(packet.nL, packet.open3L, packet.tliftL, packet.tupL, packet.extL);
+            GestureFeatures fR = GestureFeatures.From(packet.nR, packet.open3R, packet.tliftR, packet.tupR, packet.extR);
+            if (packet.handL != 1) fL.valid = false;
+            if (packet.handR != 1) fR.valid = false;
+            GestureLeft = recognizer.Update(BodySide.Izquierdo, fL, dt);
+            GestureRight = recognizer.Update(BodySide.Derecho, fR, dt);
+            RecordCapture(fL, fR);
+
+            HandsDistance = -1f;
+            if (packet.handL == 1 && packet.handR == 1 && packet.hcL != null && packet.hcR != null && packet.hcL.Length >= 2 && packet.hcR.Length >= 2)
+            {
+                HandsDistance = new Vector2(packet.hcL[0] - packet.hcR[0], packet.hcL[1] - packet.hcR[1]).magnitude / shoulderWidth0;
+            }
+            else if (hasL && hasR)
+            {
+                HandsDistance = (smoothL - smoothR).magnitude / shoulderWidth0;
+            }
+            RecordScalarCapture();
+
+            HandGesture gPanel = panelIsLeft ? GestureLeft : GestureRight;
+            bool panelHandSeen = panelIsLeft ? packet.handL == 1 : packet.handR == 1;
+            bool together = HandsDistance >= 0f && HandsDistance < calibration.handsTogether;
+
+            // ---- Juntar las manos = abrir/cerrar el panel de la cabina
+            if (together) togetherTime += dt; else togetherTime = 0f;
+            if (togetherArmed && togetherTime >= 0.4f && !calibrating && !IsCapturing)
+            {
+                frame.panelToggle = true;
+                togetherArmed = false;
+            }
+            if (!together && HandsDistance > calibration.handsTogether * 1.5f) togetherArmed = true;
+
+            // ---- Timón con la mano del panel (primera persona):
+            //   palma abajo relajada = estacionario: a los lados gira, subir la mano sube, ABRIR la mano baja
+            //   mano de canto ("like" sin pulgar) = avanza mientras se mantiene; con el pulgar arriba retrocede
+            frame.helm.tracked = panelTracked;
+            frame.helm.turn = stick.x;
+            frame.helm.vertical = Mathf.Max(0f, stick.y);
+            frame.helm.throttle = 0f;
+            frame.helm.mode = HelmMode.Estacionaria;
+            if (panelHandSeen)
+            {
+                switch (gPanel)
+                {
+                    case HandGesture.Vertical:
+                        frame.helm.mode = HelmMode.Avance;
+                        frame.helm.throttle = 1f;
+                        break;
+                    case HandGesture.VerticalPulgar:
+                        frame.helm.mode = HelmMode.Avance;
+                        frame.helm.throttle = -1f;
+                        break;
+                    case HandGesture.Abierta:
+                        frame.helm.mode = HelmMode.Suelta;
+                        frame.helm.vertical = -1f;
+                        break;
+                }
+            }
+            else
+            {
+                // sin la mano detectada: la posición de la muñeca sigue sirviendo (bajar la mano = bajar)
+                frame.helm.vertical = stick.y;
+            }
+            if (together || HandsDistance >= 0f && HandsDistance < calibration.handsTogether * 1.5f)
+            {
+                // juntando las manos no se maneja (las manos pasan por el centro)
+                frame.helm.turn = 0f;
+                frame.helm.throttle = 0f;
+                frame.helm.vertical = 0f;
+            }
+
+            // ---- Panel con los pulgares: ambas manos en reposo (palma abajo) y un pulgar levantado
+            bool readyL = packet.handL == 1 && (GestureLeft == HandGesture.Reposo || GestureLeft == HandGesture.ReposoPulgar);
+            bool readyR = packet.handR == 1 && (GestureRight == HandGesture.Reposo || GestureRight == HandGesture.ReposoPulgar);
+            frame.panelHandsReady = readyL && readyR && !together;
+            frame.thumbLeft = GestureLeft == HandGesture.ReposoPulgar;
+            frame.thumbRight = GestureRight == HandGesture.ReposoPulgar;
+            frame.pinkyPanel = panelHandSeen && gPanel == HandGesture.Menique;
+
             // ---- Compensación de tronco
             float shift = (mid - shoulderMid0).magnitude / shoulderWidth0;
             float tiltDelta = Mathf.Abs(Mathf.DeltaAngle(shoulderTilt0, tilt));
@@ -374,6 +503,124 @@ namespace CatSquad.RescateProfundo
             comp *= compensationSensitivity;
             frame.trunkCompensation = calibrating ? 0f : comp;
             frame.compensating = !calibrating && comp >= 1f;
+        }
+
+        // ------------------------------------------------------------------ calibración por gesto
+
+        /// <summary>Empieza a grabar un gesto (para las manos indicadas). Terminar con EndGestureCapture.</summary>
+        public void BeginGestureCapture(HandGesture gesture, params BodySide[] sides)
+        {
+            capture = gesture;
+            captureSpecial = null;
+            captureSides = sides ?? new BodySide[0];
+            for (int i = 0; i < 2; i++) { Array.Clear(captureSum[i], 0, GestureFeatures.Count); captureCount[i] = 0; }
+        }
+
+        /// <summary>Grabaciones especiales: "juntas" (distancia entre manos), "puno"/"abierta" (pinza del brazo).</summary>
+        public void BeginSpecialCapture(string what, BodySide side)
+        {
+            capture = HandGesture.Desconocido;
+            captureSpecial = what;
+            captureSides = new[] { side };
+            captureScalarSum = 0f;
+            captureScalarCount = 0;
+        }
+
+        private void RecordCapture(GestureFeatures fL, GestureFeatures fR)
+        {
+            if (capture == HandGesture.Desconocido) return;
+            foreach (BodySide side in captureSides)
+            {
+                GestureFeatures f = side == BodySide.Izquierdo ? fL : fR;
+                if (!f.valid) continue;
+                int i = (int)side;
+                for (int k = 0; k < GestureFeatures.Count; k++) captureSum[i][k] += f.v[k];
+                captureCount[i]++;
+            }
+        }
+
+        private void RecordScalarCapture()
+        {
+            if (captureSpecial == null || packet == null) return;
+            if (captureSpecial == "juntas")
+            {
+                if (HandsDistance >= 0f) { captureScalarSum += HandsDistance; captureScalarCount++; }
+                return;
+            }
+            BodySide side = captureSides.Length > 0 ? captureSides[0] : BodySide.Derecho;
+            bool seen = side == BodySide.Izquierdo ? packet.handL == 1 : packet.handR == 1;
+            float[] n = side == BodySide.Izquierdo ? packet.nL : packet.nR;
+            if (!seen || n == null) return;
+            captureScalarSum += side == BodySide.Izquierdo ? packet.open3L : packet.open3R;
+            captureScalarCount++;
+        }
+
+        /// <summary>Muestras válidas grabadas hasta ahora (para mostrar si la cámara ve las manos).</summary>
+        public int CaptureSamples
+        {
+            get
+            {
+                if (captureSpecial != null) return captureScalarCount;
+                int n = int.MaxValue;
+                foreach (BodySide side in captureSides) n = Mathf.Min(n, captureCount[(int)side]);
+                return n == int.MaxValue ? 0 : n;
+            }
+        }
+
+        /// <summary>Guarda la media como plantilla del niño. Devuelve false si casi no se vio la mano.</summary>
+        public bool EndGestureCapture()
+        {
+            bool ok = true;
+            if (captureSpecial != null)
+            {
+                if (captureScalarCount < 10) ok = false;
+                else
+                {
+                    float mean = captureScalarSum / captureScalarCount;
+                    if (captureSpecial == "juntas") calibration.handsTogether = Mathf.Clamp(mean * 1.6f + 0.05f, 0.2f, 1.2f);
+                    else if (captureSpecial == "puno") calibration.gripClose3 = mean;
+                    else if (captureSpecial == "abierta") calibration.gripOpen3 = mean;
+                    if (captureSpecial != "juntas" && calibration.gripOpen3 > calibration.gripClose3 + 0.1f)
+                    {
+                        // umbrales con histéresis: un tercio y dos tercios entre puño y mano abierta
+                        float a = calibration.gripClose3, b = calibration.gripOpen3;
+                        calibration.gripClose3 = Mathf.Lerp(a, b, 0.35f);
+                        calibration.gripOpen3 = Mathf.Lerp(a, b, 0.65f);
+                    }
+                }
+            }
+            else if (capture != HandGesture.Desconocido)
+            {
+                foreach (BodySide side in captureSides)
+                {
+                    int i = (int)side;
+                    if (captureCount[i] < 10) { ok = false; continue; }
+                    GestureTemplate t = new GestureTemplate { gesture = capture, side = side, features = new float[GestureFeatures.Count] };
+                    for (int k = 0; k < GestureFeatures.Count; k++) t.features[k] = captureSum[i][k] / captureCount[i];
+                    if (calibration.gestures == null) calibration.gestures = new List<GestureTemplate>();
+                    calibration.gestures.RemoveAll(g => g.gesture == capture && g.side == side);
+                    calibration.gestures.Add(t);
+                }
+                ApplyGestureCalibration();
+            }
+            capture = HandGesture.Desconocido;
+            captureSpecial = null;
+            return ok;
+        }
+
+        public void CancelGestureCapture()
+        {
+            capture = HandGesture.Desconocido;
+            captureSpecial = null;
+        }
+
+        public void ResetGestureCalibration()
+        {
+            calibration.gestures = new List<GestureTemplate>();
+            calibration.handsTogether = 0.45f;
+            calibration.gripClose3 = 0.2f;
+            calibration.gripOpen3 = 0.4f;
+            ApplyGestureCalibration();
         }
 
         private ReachEnvelope cachedCalibEnvelope;

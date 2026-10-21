@@ -3,7 +3,7 @@ using UnityEngine;
 
 namespace CatSquad.RescateProfundo
 {
-    /// <summary>Compuerta que se abre deslizándose hacia arriba cuando una bomba termina.</summary>
+    /// <summary>Compuerta que se desliza hacia arriba: la abre una bomba (vista lateral) o una esclusa (ciudad).</summary>
     public class FloodGate : MonoBehaviour
     {
         public string displayName = "Compuerta";
@@ -26,29 +26,40 @@ namespace CatSquad.RescateProfundo
             if (blocker == null) blocker = door.GetComponent<Collider>();
         }
 
+        /// <summary>
+        /// Abre o cierra la compuerta. Las compuertas de las esclusas se abren y cierran muchas veces;
+        /// la de la vista lateral solo se abre una vez.
+        /// </summary>
         public void SetOpen(bool open, bool instant)
         {
-            if (!open || IsOpen) return;
-            IsOpen = true;
+            bool changed = open != IsOpen;
+            if (!changed && !instant) return;
+            IsOpen = open;
             if (instant)
             {
-                t = 1f;
+                t = open ? 1f : 0f;
+                animating = false;
                 ApplyPosition();
-                if (blocker != null) blocker.enabled = false;
+                if (blocker != null) blocker.enabled = !open;
                 return;
             }
             animating = true;
             AudioFx.Play(AudioFx.Instance != null ? AudioFx.Instance.gateOpen : null, transform.position);
-            if (Opened != null) Opened(this);
+            if (open && Opened != null) Opened(this);
         }
 
         private void Update()
         {
             if (!animating) return;
-            t = Mathf.Clamp01(t + Time.deltaTime / Mathf.Max(0.1f, openDuration));
+            float goal = IsOpen ? 1f : 0f;
+            t = Mathf.MoveTowards(t, goal, Time.deltaTime / Mathf.Max(0.1f, openDuration));
             ApplyPosition();
-            if (t > 0.7f && blocker != null) blocker.enabled = false;
-            if (t >= 1f) animating = false;
+            if (blocker != null)
+            {
+                if (IsOpen && t > 0.7f) blocker.enabled = false;
+                else if (!IsOpen && t < 0.6f) blocker.enabled = true;
+            }
+            if (Mathf.Approximately(t, goal)) animating = false;
         }
 
         private void ApplyPosition()

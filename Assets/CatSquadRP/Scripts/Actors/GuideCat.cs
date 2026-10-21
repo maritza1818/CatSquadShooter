@@ -27,6 +27,11 @@ namespace CatSquad.RescateProfundo
 
         [Header("Pistas")]
         public float hintAfterSeconds = 45f;
+
+        [Header("Lab 05: esquivar lo que cae")]
+        public float dangerRadius = 2.6f;
+        public float dangerSeconds = 2.5f;
+        private bool dodgeSaid;
         public Transform pointerArrow;
 
         public GuideMode Mode { get; private set; }
@@ -57,6 +62,9 @@ namespace CatSquad.RescateProfundo
             MaterialCrate.AnyCrateOpened += OnCrateOpened;
             RescuedKitten.AnyFreed += OnKittenFreed;
             RescuedKitten.AnyRescued += OnKittenRescued;
+            SecretBell.AnyFound += OnSecretFound;
+            CityDistrict.AnyFreed += OnDistrictFreed;
+            LaunchTarget.AnyHit += OnTargetHit;
         }
 
         private void OnDisable()
@@ -64,6 +72,9 @@ namespace CatSquad.RescateProfundo
             MaterialCrate.AnyCrateOpened -= OnCrateOpened;
             RescuedKitten.AnyFreed -= OnKittenFreed;
             RescuedKitten.AnyRescued -= OnKittenRescued;
+            SecretBell.AnyFound -= OnSecretFound;
+            CityDistrict.AnyFreed -= OnDistrictFreed;
+            LaunchTarget.AnyHit -= OnTargetHit;
         }
 
         private void Start()
@@ -148,6 +159,19 @@ namespace CatSquad.RescateProfundo
             SubmarineController sub = GameManager.Instance != null ? GameManager.Instance.submarine : null;
             if (reactionCooldown > 0f) reactionCooldown -= dt;
 
+            // LAB 05 · ¿me va a caer encima? Si un lastre predicho cae cerca en los próximos segundos: FLEE del punto
+            PredictedImpact threat = PredictedImpacts.Threat(agent.Position, dangerRadius, dangerSeconds);
+            if (threat != null)
+            {
+                agent.body.maxSpeed = travelSpeed * 1.6f;
+                agent.Step(agent.body.Flee(threat.point), dt);
+                agent.debugMode = SteeringMode.Flee;
+                agent.debugTarget = threat.point;
+                if (!dodgeSaid) { dodgeSaid = true; Say("¡Uy! ¡Eso cae justo aquí, me aparto!"); }
+                UpdatePointer(dt);
+                return;
+            }
+
             switch (Mode)
             {
                 case GuideMode.Viajando:
@@ -164,7 +188,7 @@ namespace CatSquad.RescateProfundo
                     agent.ArriveAt(holdPoint, 1.5f, 0.05f, dt);
                     if (sub != null && agent.Velocity.magnitude < 0.3f)
                     {
-                        agent.LookTowardsX(sub.transform.position.x - agent.Position.x);
+                        agent.FaceTowards(sub.transform.position);
                     }
                     break;
 
@@ -181,6 +205,20 @@ namespace CatSquad.RescateProfundo
 
         private Vector3 FollowTarget(SubmarineController sub)
         {
+            if (GameManager.FirstPerson)
+            {
+                // En primera persona la guía nada DELANTE y a un lado, para que el niño la vea
+                Vector3 front = sub.transform.position + sub.Forward * 3.4f + sub.Right * 1.7f + Vector3.up * 0.7f;
+                Vector3 from = sub.transform.position;
+                Vector3 dirF = front - from;
+                RaycastHit hitF;
+                if (!Physics.Raycast(from, dirF.normalized, out hitF, dirF.magnitude + 0.5f, ~0, QueryTriggerInteraction.Ignore)
+                    || hitF.collider.GetComponentInParent<Grabbable>() != null || hitF.collider.GetComponentInParent<Grate>() != null)
+                {
+                    return front;
+                }
+                return sub.GetPointBehind(followDistance) + Vector3.up * 0.6f;
+            }
             Vector3 onTrail = sub.GetPointBehind(followDistance);
             Vector3 raised = onTrail + Vector3.up * followHeight;
             Vector3 origin = sub.transform.position;
@@ -214,6 +252,31 @@ namespace CatSquad.RescateProfundo
                 Say(text);
                 PointAt(target, 6f);
             }
+        }
+
+        /// <summary>Botón PISTA del panel de la cabina: la guía señala el siguiente objetivo.</summary>
+        public void GiveHint()
+        {
+            idleTimer = 0f;
+            SubmarineController sub = GameManager.Instance != null ? GameManager.Instance.submarine : null;
+            if (sub == null) return;
+            Vector3 target;
+            string text;
+            if (RailPilot.Instance != null && RailPilot.Instance.TryGetTarget(out target))
+            {
+                Say("¡Por allá! El riel ya nos lleva a " + RailPilot.Instance.Current.Label + ".");
+                PointAt(target, 6f);
+                return;
+            }
+            if (FindHintTarget(sub.transform.position, out target, out text))
+            {
+                Say(text);
+                PointAt(target, 6f);
+                return;
+            }
+            Say(GameManager.FirstPerson
+                ? "Por aquí ya revisamos todo. ¡Busca la esclusa para pasar al siguiente barrio, o explora los callejones!"
+                : "Por aquí ya revisamos todo. ¡Sigamos explorando!");
         }
 
         private bool FindHintTarget(Vector3 from, out Vector3 target, out string text)
@@ -271,13 +334,15 @@ namespace CatSquad.RescateProfundo
         {
             idleTimer = 0f;
             reactionCooldown = 0f;
-            React("¡Liberaste a " + k.kittenName + "! Te seguirá hasta el muelle. ¡Llévalo a la superficie!");
+            React(GameManager.FirstPerson
+                ? "¡Liberaste a " + k.kittenName + "! Te seguirá en fila. ¡Llévalo a la balsa de rescate del barrio!"
+                : "¡Liberaste a " + k.kittenName + "! Te seguirá hasta el muelle. ¡Llévalo a la superficie!");
         }
 
         private void OnKittenRescued(RescuedKitten k)
         {
             reactionCooldown = 0f;
-            React("¡" + k.kittenName + " está a salvo en el muelle! Gracias, capitán.");
+            React("¡" + k.kittenName + (GameManager.FirstPerson ? " está a salvo en la balsa!" : " está a salvo en el muelle!") + " Gracias, capitán.");
         }
 
         private void OnPumpCompleted(PumpStation p)
@@ -287,10 +352,42 @@ namespace CatSquad.RescateProfundo
             React("¡La " + p.displayName.ToLower() + " terminó su trabajo!");
         }
 
+        private void OnSecretFound(SecretBell b)
+        {
+            idleTimer = 0f;
+            reactionCooldown = 0f;
+            React("¡Un cascabel dorado! Esos solo los encuentran los capitanes que exploran manejando por su cuenta.");
+        }
+
+        private void OnDistrictFreed(CityDistrict d)
+        {
+            idleTimer = 0f;
+            reactionCooldown = 0f;
+            React("¡" + d.displayName + " se liberó del agua! Mira cómo se encienden las luces. Ahora podemos llegar a sus calles.");
+        }
+
+        private int targetHits;
+
+        private void OnTargetHit(LaunchTarget t, Projectile p)
+        {
+            idleTimer = 0f;
+            targetHits++;
+            if (t.kind == LaunchTargetKind.Cesta)
+            {
+                reactionCooldown = 0f;
+                React(targetHits == 1 ? "¡Justo en la cesta! Mira cómo se la come. ¿Ves? La lata siguió la curva de los puntos."
+                                      : (p != null && p.LaunchPower > 0.8f ? "¡Qué tirón! ¡Directo a la cesta!" : "¡Otro gatito con la panza llena!"));
+            }
+            else if (t.kind == LaunchTargetKind.Placa) React("¡La placa se hundió! El lastre cae en curva porque pesa más que el agua.");
+            else React("¡La boya se enganchó! Subió en curva porque es más liviana que el agua.");
+        }
+
         private void OnPressure()
         {
             reactionCooldown = 0f;
-            React("¡Uf! El casco no aguanta más presión. Con la mejora de Profundidad podremos bajar más.");
+            React(GameManager.FirstPerson
+                ? "¡Uf! El casco no aguanta más presión. Si drenamos el barrio, su fondo quedará más cerca de la superficie."
+                : "¡Uf! El casco no aguanta más presión. Con la mejora de Profundidad podremos bajar más.");
         }
     }
 }

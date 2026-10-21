@@ -31,6 +31,10 @@ namespace CatSquad.RescateProfundo
         public Transform intake;
         public float dockRadius = 1.8f;
         public float intakeRadius = 1.4f;
+        [Tooltip("Primera persona: distancia a la toma para anclarse")]
+        public float firstPersonDockDistance = 5.5f;
+        [Tooltip("Primera persona: dirección (índice de WorkPose.Directions) en que queda la toma respecto del brazo")]
+        public int firstPersonDirection = 2;
 
         [Header("Bombeo")]
         [Tooltip("Litros (bidones) necesarios para completar la bomba")]
@@ -94,6 +98,14 @@ namespace CatSquad.RescateProfundo
             leverAngle = leverDownAngle;
         }
 
+        /// <summary>Pose de anclaje en primera persona: la toma queda al ~65 % del alcance, arriba a la derecha.</summary>
+        public bool GetFirstPersonDockPose(SubmarineController sub, out Vector3 pos, out float yaw)
+        {
+            Vector3 target = intake != null ? intake.position : transform.position + Vector3.up * 2f;
+            ManipulatorArm arm = GameManager.Instance != null ? GameManager.Instance.arm : null;
+            return WorkPose.FindPose(sub, arm, target, firstPersonDirection, 0.65f, 2.0f, out pos, out yaw);
+        }
+
         public bool RequiresLeverForFuel
         {
             get { return GameManager.Instance == null || GameManager.Instance.Settings.requireLeverWhilePouring; }
@@ -126,19 +138,35 @@ namespace CatSquad.RescateProfundo
             BimanualFrame frame = BimanualInput.Instance != null ? BimanualInput.Instance.Current : new BimanualFrame();
 
             // ---- acople automático cuando el submarino se acerca despacio
-            if (sub != null && dockPoint != null && sub.CanDock && sub.InputEnabled && !Complete)
+            if (sub != null && sub.CanDock && sub.InputEnabled && !Complete)
             {
-                Vector3 d = sub.transform.position - dockPoint.position;
-                d.z = 0f;
-                if (d.magnitude < dockRadius && sub.Velocity.magnitude < 2.2f)
+                if (GameManager.FirstPerson)
                 {
-                    sub.DockTo(this);
+                    if (intake != null)
+                    {
+                        Vector3 to = intake.position - sub.transform.position;
+                        Vector3 flat = new Vector3(to.x, 0f, to.z);
+                        bool heading = flat.sqrMagnitude < 0.25f || Vector3.Angle(sub.Forward, flat) < 75f;
+                        bool railAllows = RailPilot.Instance == null || RailPilot.Instance.AllowsDock(this);
+                        if (to.magnitude < firstPersonDockDistance && sub.Velocity.magnitude < 2.2f && heading && railAllows) sub.DockTo(this);
+                    }
+                }
+                else if (dockPoint != null)
+                {
+                    Vector3 d = sub.transform.position - dockPoint.position;
+                    d.z = 0f;
+                    if (d.magnitude < dockRadius && sub.Velocity.magnitude < 2.2f)
+                    {
+                        sub.DockTo(this);
+                    }
                 }
             }
 
             // ---- palanca (mano asistente sostenida)
             bool docked = sub != null && sub.DockedPump == this && sub.InputEnabled;
-            LeverHeld = docked && frame.panel.tracked && (frame.panel.lever || frame.panel.joystick.y > 0.55f);
+            bool leverGesture = frame.panel.lever || frame.panel.joystick.y > 0.55f
+                                || (GameManager.FirstPerson && frame.helm.tracked && frame.helm.vertical > 0.5f);
+            LeverHeld = docked && (frame.panel.tracked || frame.helm.tracked) && leverGesture;
 
             // ---- bombeo
             IsPumping = false;
